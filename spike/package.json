@@ -16,6 +16,7 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
+  "icon": "images/icon.png",
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true
@@ -26,6 +27,10 @@
       {
         "command": "contextprune.spike.runDiagnostics",
         "title": "ContextPrune Spike: Run API Diagnostics"
+      },
+      {
+        "command": "contextprune.spike.runBenchmark",
+        "title": "ContextPrune Spike: Run Token-Savings Benchmark"
       }
     ],
     "chatParticipants": [

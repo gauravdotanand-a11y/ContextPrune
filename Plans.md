@@ -266,7 +266,101 @@ assumption anywhere; always read `model.maxInputTokens` live.
 
 ---
 
-## 6. Architecture sketch
+## 6. Proving savings — measurement methodology, benchmark, dashboard, branding
+
+This is the piece that makes ContextPrune *worth installing*, not just correct: a
+skeptical org needs to **see** a number, trust where it came from, and see it again over
+time. "Trust me, I counted tokens" isn't enough — so this section is explicit about what
+we can prove, how, and with what caveats.
+
+### Why we can't just show "you saved $X" from day one
+
+- The LM API gives us **no billing data** — only `countTokens` on prompts *we* construct.
+  We never see the actual bill for the built‑in inline/chat/agent engine.
+- GitHub does expose an **org‑level Copilot usage/billing REST API** to admins, but it
+  needs an admin PAT and org‑admin cooperation — a bigger, separate ask, not something the
+  extension can quietly call (would also violate the "no new outbound calls by default"
+  rule). Treated as an **optional, opt‑in Phase 4** correlation source, never a dependency.
+- VS Code's own **native** cost surfaces (per‑response hover credit cost, the model‑picker
+  cost tier, Agent Debug Logs → Cache Explorer) *are* ground truth, but they're rendered
+  UI, not an API — we can't scrape them. We point users at them; we don't fake reading them.
+
+So credible proof has to be built from **three legs**, not one invented number:
+
+| Leg | What it is | Confidence | When |
+|---|---|---|---|
+| **A. Benchmark mode** | A small, fixed, repeatable set of real dev tasks, run twice through the **same model** in the user's **own org** — once "vanilla" (no brevity instruction), once "ContextPrune‑style" (terse instruction framing) — measuring real `countTokens` on the real responses. | High for the *isolated instruction‑discipline effect*; doesn't capture caching/model‑downshift/Agent‑mode savings. | Available **now** — added to the spike this session (see below). |
+| **B. Production ledger, tagged with/without** | Every interaction ContextPrune observes (its own participant/tool calls, plus the inline "context footprint" estimate) logged locally with a flag: were ContextPrune's interventions active for this interaction. Aggregated over real usage, not a synthetic test. | Medium — real usage, but our own token estimate, and task mix isn't controlled. | Phase 1 (dashboard ships with it). |
+| **C. Org billing correlation** (optional) | An admin pastes in (or points at) actual org Copilot usage numbers periodically; the dashboard overlays them against Leg B's estimate to show "our estimate tracked real spend within Y%." | Highest, but requires admin participation and is opt‑in only. | Phase 4, never required. |
+
+**For an initial showcase to your org, Leg A (benchmark) is the right one to lead with** —
+it's reproducible, uses your org's real models and real pricing, and doesn't require
+weeks of production data first.
+
+### Benchmark mode — added to the spike this session
+
+New command: **`ContextPrune Spike: Run Token‑Savings Benchmark`**. It:
+
+1. Picks the best available `copilot` model (same model for both variants — isolates the
+   *instruction‑discipline* effect from any model‑choice or caching effect, so the
+   comparison is fair and not inflated).
+2. Runs a fixed set of **3 representative tasks** (explain a function, add error handling,
+   write a unit test — kept small deliberately: 3 tasks × 2 variants = 6 real, billed model
+   calls) as **independent single‑turn requests** (not part of one chat, so no shared‑cache
+   confound between variants):
+   - **Baseline variant** — the task, unmodified, no brevity instruction (mimics an
+     un‑optimized Copilot Chat turn).
+   - **Lean variant** — the same task prefixed with ContextPrune's terse‑output instruction
+     ("Be concise. Code only unless asked. No preamble or summary.").
+3. Measures real input/output tokens via `countTokens` on the actual prompt and streamed
+   response text for every call.
+4. Prices both variants using the seed `model-pricing.json` (§3) for whichever model ran,
+   and reports input/output/estimated‑$ deltas and a % reduction, per task and totaled.
+5. **Asks for confirmation before running** (shows call count + which model + "this uses
+   real Copilot quota") — it is not silent, and never runs on its own.
+6. Prints an explicit caveat block: same‑model comparison only (real savings compound
+   further with model downshift + caching + fewer Agent tool round‑trips, none of which
+   this benchmark measures); LLM output length varies run‑to‑run, so treat the % as
+   illustrative, not a guarantee — run it a few times.
+
+This gives you a **real number, from your own org's models, today** — "on 3 representative
+tasks, terse instructions cut output tokens by N% and estimated cost by $Y" — to open a
+conversation with your org, ahead of the full dashboard.
+
+### Dashboard — spec (Phase 1 build; mockup available now)
+
+A VS Code **webview panel** (`ContextPrune: Open Dashboard`), rendered with hand‑rolled
+inline SVG (no charting‑library CDN — nothing external is allowed to load in a webview in
+this environment; a bundled UMD chart lib is the fallback if hand‑rolled SVG proves
+insufficient). Sections:
+
+1. **Benchmark results** — the Leg‑A numbers above, saved locally and re‑run‑able, so this
+   is the first thing a skeptical colleague sees.
+2. **Session ledger (Leg B)** — tokens/cost over time, split **with ContextPrune active**
+   vs **without** (a master on/off toggle tags every entry), by mode and by token type.
+3. **Instructions & mode health** — instructions‑budget flags, whether the Lean mode is the
+   active default, tool/MCP overhead.
+4. **Links to native ground truth** — deep links / instructions to the model‑picker cost
+   tier, per‑response hover cost, and Cache Explorer, so numbers are always checkable
+   against VS Code's own UI, never just ours.
+
+Data source: `context.storageUri` (a local JSON file, purely local, never transmitted —
+consistent with the no‑telemetry rule; it's the user's own data, exportable by them).
+
+A **visual mockup** of this dashboard (illustrative data, clearly labeled as a mockup) is
+available as a separate artifact so we can agree on the design before building the real
+webview — see the message accompanying this plan update.
+
+### Branding — icon
+
+VS Code requires a **PNG** icon (`icon` field in `package.json`; SVG is rejected by
+`vsce package`). A simple mark was generated this session and wired into the spike so it
+already looks like a real, installable extension rather than a bare scaffold — see
+`spike/images/icon.png`.
+
+---
+
+## 7. Architecture sketch
 
 - **Language:** TypeScript. **Bundler:** `esbuild`. **No native modules.** Optional wasm tokenizer.
 - **Modules:** `tokenizer/`, `context-model/` (inline footprint), `rules/` (toggle engine),
@@ -281,7 +375,7 @@ assumption anywhere; always read `model.maxInputTokens` live.
 
 ---
 
-## 7. Known limitations (state up front)
+## 8. Known limitations (state up front)
 
 1. Cannot read/modify the built‑in **inline** or **chat/agent** prompt — only influence
    inputs, output constraints (via instructions/mode), request frequency, tools, and model.
@@ -303,20 +397,21 @@ assumption anywhere; always read `model.maxInputTokens` live.
 
 ---
 
-## 8. Phased roadmap
+## 9. Phased roadmap
 
 | Phase | Goal | Deliverable |
 |---|---|---|
-| **0 — Spike (~1 wk)** | De‑risk APIs | `countTokens`, `selectChatModels` (+ enumerate models), participant registration, `github.copilot.*` read, tab enumeration, custom‑mode detection — in Restricted Mode **and** offline. **Scaffolded → [`spike/`](spike/), compiles clean, `engines ^1.95.0`. Awaiting an org run (§10).** |
-| **1 — Measure + Output discipline** | Visibility + the cheapest big win | Token HUD, cost ledger (per mode / token type), instructions budget report, per‑file lens, terse‑output presets, prompt linter. Local tokenizer. Ship `.vsix`. |
+| **0 — Spike (~1 wk)** | De‑risk APIs | `countTokens`, `selectChatModels` (+ enumerate models), participant registration, `github.copilot.*` read, tab enumeration, custom‑mode detection — in Restricted Mode **and** offline. **Scaffolded → [`spike/`](spike/), compiles clean, `engines ^1.95.0`. Ran in the org — see §11.** |
+| **0.5 — Proof (this session)** | A showcase‑ready number, fast | **Benchmark mode** added to the spike (real, org‑specific, before/after token counts); a **dashboard mockup** to agree on design; a **branded icon** so it looks real. See §6. |
+| **1 — Measure + Output discipline** | Visibility + the cheapest big win | Token HUD, **real dashboard webview** (built from the Proof spec), cost ledger (per mode / token type, with/without tagging), instructions budget report, per‑file lens, terse‑output presets, prompt linter. Local tokenizer. Ship `.vsix`. |
 | **2 — Reduce inline** | Cut wasted inline requests | Smart tab manager, contextual toggling, exclusion assistant, "prefer completions" nudge. |
 | **3 — Chat + cache + Agent** | Ask path, cache hygiene, Agent hooks | `@contextprune` participant, cache‑buster warnings, cache‑friendly ordering, history nudge, cache‑aware model downshift, `/trim` + `contextprune_retrieve` tools, "Lean" custom mode, tool/MCP hygiene report, `prompt-tsx`. |
-| **4 — Govern** | Org rollout | Team profile, policy‑lockable settings, FinOps report, run guardrails, signed `.vsix` + silent‑install layout. |
+| **4 — Govern** | Org rollout | Team profile, policy‑lockable settings, FinOps report, run guardrails, signed `.vsix` + silent‑install layout, optional admin‑billing‑API correlation (Leg C, §6). |
 | **5 — Polish** | Internal GA | Docs, onboarding (output discipline + Ask vs Agent + cache), Node‑free deps for a possible web build. |
 
 ---
 
-## 9. Decisions (locked)
+## 10. Decisions (locked)
 
 1. **Target surface:** both inline + chat (Ask + Agent). Phased, Measure first.
 2. **Chat approach:** build both, end user chooses — `@contextprune` participant (opt‑in Ask
@@ -329,10 +424,14 @@ assumption anywhere; always read `model.maxInputTokens` live.
    there. Core floor stays `^1.95.0` for portability to other orgs.
 6. **Content exclusions (open):** advisory‑only assumed (lint + draft), no admin dependency —
    confirm.
+7. **Proof methodology:** lead with **Benchmark mode** (real, org‑specific, reproducible)
+   for the initial showcase; production ledger with with/without tagging for ongoing proof;
+   org billing‑API correlation stays **optional, Phase 4, admin opt‑in** — never required,
+   never a default network call.
 
 ---
 
-## 10. Phase 0 spike — org verification checklist
+## 11. Phase 0 spike — org verification checklist
 
 Run [`spike/`](spike/): `npm install && npm run compile`, **F5**, then **"ContextPrune Spike:
 Run API Diagnostics"** → read the *ContextPrune Spike* output channel. It compiles clean here;
@@ -357,7 +456,7 @@ these need a run **inside the real org**:
 
 ---
 
-## 11. Sources
+## 12. Sources
 
 - [Improving token efficiency for GitHub Copilot in VS Code — VS Code blog (Jun 2026)](https://code.visualstudio.com/blogs/2026/06/17/improving-token-efficiency-in-github-copilot)
 - [Optimize your usage of premium requests — VS Code docs](https://code.visualstudio.com/docs/agents/guides/optimize-usage)

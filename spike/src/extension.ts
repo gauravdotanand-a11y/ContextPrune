@@ -11,11 +11,68 @@ import * as vscode from 'vscode';
 
 const CHANNEL = vscode.window.createOutputChannel('ContextPrune Spike');
 
+/**
+ * Seed pricing ($ / 1M tokens), confirmed against GitHub's usage-based pricing docs on
+ * 2026-09-15 and matched to models actually returned by a live org. Family names Copilot
+ * doesn't expose pricing for (e.g. gpt-4o-mini) are deliberately omitted — "cost unknown"
+ * beats a guessed number. Keep in sync with Plans.md §3 if prices change.
+ */
+const MODEL_PRICING: Record<string, { input: number; cachedInput: number; output: number }> = {
+  'gpt-5.6-luna': { input: 0.2, cachedInput: 0.02, output: 1.2 },
+  'gpt-5-mini': { input: 0.25, cachedInput: 0.025, output: 2.0 },
+  'gemini-3.7-flash': { input: 0.75, cachedInput: 0.075, output: 3.75 },
+  'gemini-3.8-flash': { input: 0.75, cachedInput: 0.075, output: 3.75 },
+  'gpt-5.4-mini': { input: 0.75, cachedInput: 0.075, output: 4.5 },
+  'claude-haiku-4.5': { input: 1.0, cachedInput: 0.1, output: 5.0 },
+  'gpt-5.3-codex': { input: 1.75, cachedInput: 0.175, output: 14.0 },
+  'claude-sonnet-5': { input: 2.0, cachedInput: 0.2, output: 10.0 },
+  'gpt-5.6-terra': { input: 2.0, cachedInput: 0.2, output: 12.0 },
+  'gpt-5.6-sol': { input: 4.0, cachedInput: 0.4, output: 20.0 },
+  'claude-opus-4.8': { input: 5.0, cachedInput: 0.5, output: 25.0 },
+  'claude-opus-5': { input: 5.0, cachedInput: 0.5, output: 25.0 },
+  'gpt-5.5': { input: 5.0, cachedInput: 0.5, output: 30.0 },
+};
+
+/** Copilot's own internal/utility models — never offer these as benchmark or downshift picks. */
+const NON_USER_FACING_FAMILIES = new Set([
+  'copilot-utility',
+  'copilot-utility-small',
+  'copilot-dictation-cleanup-luna',
+]);
+
+const SAMPLE_FUNCTION = `function parseAmount(input) {
+  const cleaned = input.replace(/[^0-9.]/g, '');
+  return parseFloat(cleaned);
+}`;
+
+const BENCHMARK_TASKS: { id: string; task: string }[] = [
+  {
+    id: 'explain',
+    task: `Explain what this function does:\n\n${SAMPLE_FUNCTION}`,
+  },
+  {
+    id: 'error-handling',
+    task: `Add input validation and error handling to this function:\n\n${SAMPLE_FUNCTION}`,
+  },
+  {
+    id: 'unit-tests',
+    task: `Write unit tests for this function:\n\n${SAMPLE_FUNCTION}`,
+  },
+];
+
+const LEAN_INSTRUCTION =
+  'Be concise. Code only unless asked for an explanation. No preamble, no summary, ' +
+  'no restating the task.';
+
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(
       'contextprune.spike.runDiagnostics',
       runDiagnostics,
+    ),
+    vscode.commands.registerCommand(
+      'contextprune.spike.runBenchmark',
+      runBenchmark,
     ),
   );
 
@@ -214,6 +271,129 @@ async function runDiagnostics(): Promise<void> {
     `ContextPrune spike: ${Object.keys(results).length} checks, ${failed} failed. ` +
       `See the "ContextPrune Spike" output channel.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark — real, org-specific evidence: the same model, the same 3 tasks, run once
+// "vanilla" and once with ContextPrune's terse-output instruction, measuring actual
+// countTokens on actual responses. This is Leg A of the "prove savings" methodology
+// in Plans.md §6. It makes real, billed model calls — nothing runs without confirmation.
+// ---------------------------------------------------------------------------
+
+async function runBenchmark(): Promise<void> {
+  const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+  const model = models.find(
+    (m) => m.maxInputTokens > 0 && !NON_USER_FACING_FAMILIES.has(m.family) && m.id !== 'auto',
+  );
+
+  if (!model) {
+    void vscode.window.showErrorMessage(
+      'ContextPrune benchmark: no usable copilot chat model available (run ' +
+        '"ContextPrune Spike: Run API Diagnostics" first to see why).',
+    );
+    return;
+  }
+
+  const callCount = BENCHMARK_TASKS.length * 2;
+  const confirm = await vscode.window.showWarningMessage(
+    `Run the ContextPrune benchmark? This sends ${callCount} real requests to ` +
+      `"${model.family}" (${BENCHMARK_TASKS.length} tasks × 2 variants) and uses your ` +
+      'org\'s Copilot quota.',
+    { modal: true },
+    'Run benchmark',
+  );
+  if (confirm !== 'Run benchmark') {
+    return;
+  }
+
+  CHANNEL.clear();
+  CHANNEL.show(true);
+  const log = (s = ''): void => CHANNEL.appendLine(s);
+  const pricing = MODEL_PRICING[model.family];
+
+  log('='.repeat(64));
+  log('ContextPrune token-savings benchmark');
+  log(new Date().toISOString());
+  log(`Model: ${model.vendor}/${model.family} (maxInputTokens=${model.maxInputTokens})`);
+  log(pricing ? `Pricing: known ($${pricing.input}/${pricing.output} per 1M in/out)` : 'Pricing: UNKNOWN for this family — $ estimates omitted');
+  log('CAVEATS: same model both variants (isolates instruction-discipline only — real');
+  log('  savings compound further with model downshift, caching, fewer Agent tool calls,');
+  log('  none of which this measures); LLM output length varies run-to-run — treat the %');
+  log('  as illustrative and re-run a few times before quoting a single number.');
+  log('='.repeat(64));
+
+  type Variant = { label: string; promptTokens: number; outputTokens: number };
+  const rows: { taskId: string; baseline: Variant; lean: Variant }[] = [];
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Running ContextPrune benchmark' },
+    async (progress, token) => {
+      for (const [i, t] of BENCHMARK_TASKS.entries()) {
+        progress.report({ message: `${t.id} (${i + 1}/${BENCHMARK_TASKS.length})`, increment: (100 / BENCHMARK_TASKS.length) });
+        log(`\n[${t.id}]`);
+        const baseline = await runVariant(model, 'baseline', t.task, token);
+        const lean = await runVariant(model, 'lean', `${LEAN_INSTRUCTION}\n\n${t.task}`, token);
+        rows.push({ taskId: t.id, baseline, lean });
+        log(`    baseline: input=${baseline.promptTokens} output=${baseline.outputTokens}`);
+        log(`    lean:     input=${lean.promptTokens} output=${lean.outputTokens}`);
+        const outputDelta = baseline.outputTokens - lean.outputTokens;
+        const outputPct = baseline.outputTokens > 0 ? Math.round((outputDelta / baseline.outputTokens) * 100) : 0;
+        log(`    output tokens: ${outputPct >= 0 ? '-' : '+'}${Math.abs(outputPct)}% (${outputDelta >= 0 ? '-' : '+'}${Math.abs(outputDelta)} tokens)`);
+      }
+    },
+  );
+
+  log('\n' + '='.repeat(64));
+  log('TOTALS');
+  log('='.repeat(64));
+  const totalBaselineOut = rows.reduce((s, r) => s + r.baseline.outputTokens, 0);
+  const totalLeanOut = rows.reduce((s, r) => s + r.lean.outputTokens, 0);
+  const totalBaselineIn = rows.reduce((s, r) => s + r.baseline.promptTokens, 0);
+  const totalLeanIn = rows.reduce((s, r) => s + r.lean.promptTokens, 0);
+  const outPct = totalBaselineOut > 0 ? Math.round(((totalBaselineOut - totalLeanOut) / totalBaselineOut) * 100) : 0;
+  log(`  output tokens: baseline=${totalBaselineOut}  lean=${totalLeanOut}  (${outPct >= 0 ? '-' : '+'}${Math.abs(outPct)}%)`);
+  log(`  input tokens:  baseline=${totalBaselineIn}  lean=${totalLeanIn}`);
+
+  let costLine = 'estimated cost: pricing unknown for this model family';
+  if (pricing) {
+    const cost = (inTok: number, outTok: number): number =>
+      (inTok * pricing.input + outTok * pricing.output) / 1_000_000;
+    const baselineCost = cost(totalBaselineIn, totalBaselineOut);
+    const leanCost = cost(totalLeanIn, totalLeanOut);
+    const costPct = baselineCost > 0 ? Math.round(((baselineCost - leanCost) / baselineCost) * 100) : 0;
+    costLine = `  estimated cost (fresh-input assumption, no cache credit): baseline=$${baselineCost.toFixed(5)}  lean=$${leanCost.toFixed(5)}  (${costPct >= 0 ? '-' : '+'}${Math.abs(costPct)}%)`;
+    log(costLine);
+  } else {
+    log(`  ${costLine}`);
+  }
+  log('\nThis is illustrative, from one run, on 3 tasks, one model. Re-run a few times');
+  log('before quoting a single number to your org.');
+
+  void vscode.window.showInformationMessage(
+    `Benchmark done: output tokens ${outPct >= 0 ? '-' : '+'}${Math.abs(outPct)}% with terse ` +
+      `instructions (same "${model.family}" model, 3 tasks). See the output channel for detail.`,
+  );
+}
+
+async function runVariant(
+  model: vscode.LanguageModelChat,
+  label: string,
+  promptText: string,
+  token: vscode.CancellationToken,
+): Promise<{ label: string; promptTokens: number; outputTokens: number }> {
+  const messages = [vscode.LanguageModelChatMessage.User(promptText)];
+  const promptTokens = await model.countTokens(promptText);
+  let responseText = '';
+  try {
+    const resp = await model.sendRequest(messages, {}, token);
+    for await (const chunk of resp.text) {
+      responseText += chunk;
+    }
+  } catch (err) {
+    CHANNEL.appendLine(`    [${label}] sendRequest failed: ${errText(err)}`);
+  }
+  const outputTokens = responseText ? await model.countTokens(responseText) : 0;
+  return { label, promptTokens, outputTokens };
 }
 
 // ---------------------------------------------------------------------------
