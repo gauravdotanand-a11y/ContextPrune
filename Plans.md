@@ -277,8 +277,9 @@ reviewable source). ContextPrune ⊃ this extension's advisory feature set.
    instructions linting. Onboarding explains the trade‑off; nothing forced.
 3. **Distribution:** signed `.vsix` only. No marketplace.
 4. **Telemetry:** none.
-5. **Engine:** `^1.95.0` core; the "Lean" mode feature activates only on **≥ 1.102** — confirm
-   the org's deployed build.
+5. **Engine:** `^1.95.0` core; the "Lean" mode feature activates only on **≥ 1.102** — confirmed:
+   target org runs **1.137.0**, so both floors are satisfied and the Lean mode ships unconditionally
+   there. Core floor stays `^1.95.0` for portability to other orgs.
 6. **Content exclusions (open):** advisory‑only assumed (lint + draft), no admin dependency —
    confirm.
 
@@ -290,21 +291,21 @@ Run [`spike/`](spike/): `npm install && npm run compile`, **F5**, then **"Contex
 Run API Diagnostics"** → read the *ContextPrune Spike* output channel. It compiles clean here;
 these need a run **inside the real org**:
 
-| # | Check | How | Why it changes the plan |
-|---|---|---|---|
-| 1 | LM API returns Copilot models | check [4] `OK` / `EMPTY` | If policy blocks the LM API for extensions, the `@contextprune` pillar dies → tools + Lean mode + advice only. |
-| 2 | Consent dialog appears & is acceptable | first run of [4] | Admin‑blocked consent = same as #1. |
-| 3 | Which models are enabled + families | [4] model list | Feeds the multiplier table + downshift; are cheap `*-mini` models even available? |
-| 4 | `.vsix` sideload allowed | `code --install-extension …` | Signature / `extensions.allowed` policy may need the org signing path first. |
-| 5 | `countTokens` vs naive delta | [5] output | Whether a bundled offline tokenizer is trustworthy as fallback. |
-| 6 | `github.copilot.advanced` + lock scope | [3] output | Which knobs are centrally managed vs. ours to set. |
-| 7 | Custom mode support (≥ 1.102, "Configure Chat Modes") | [6] output | Ship the Lean mode now or gate it. |
-| 8 | Content exclusions in effect | open large/vendored files | Advisory‑only OK, or org expects us to drive exclusions. |
-| 9 | Restricted Mode default + spike still works | [1] says `RESTRICTED … works` | Confirms `untrustedWorkspaces: supported` suffices. |
-| 10 | Offline behaviour | disconnect, re‑run | [1][2][3] pass; [4][5] fail *fast*. A hang is a Phase 1 bug. |
-| 11 | Auth proxy | note `http.proxy` / `http.proxySupport` | Confirms the real extension needs zero HTTP of its own. |
-| 12 | Deployed VS Code version | Help → About | Confirms `^1.95.0` and whether ≥ 1.102 features exist. |
-| 13 | Native cost UI available | model picker cost tier? response‑hover cost? Agent Debug Logs → Cache Explorer? | If present, our ledger *links to* them instead of estimating; if stripped in the org build, our estimate matters more. |
+| # | Check | How | Why it changes the plan | Status |
+|---|---|---|---|---|
+| 1 | LM API returns Copilot models | check [4] `OK` / `EMPTY` | If policy blocks the LM API for extensions, the `@contextprune` pillar dies → tools + Lean mode + advice only. | ✅ **19 models returned** — LM API is usable in this org. Vendor‑filtered `copilot` count + consent‑flow detail still TBD (see #2). |
+| 2 | Consent dialog appears & is acceptable | first run of [4] | Admin‑blocked consent = same as #1. | ❓ pending — did a consent prompt appear, and did you accept it? |
+| 3 | Which models are enabled + families | [4] model list | Feeds the multiplier table + downshift; are cheap `*-mini` models even available? | ✅ **19 models** confirmed; full list of ids/families still needed to populate the multiplier table — paste it when convenient. |
+| 4 | `.vsix` sideload allowed | `code --install-extension …` | Signature / `extensions.allowed` policy may need the org signing path first. | ❓ pending |
+| 5 | `countTokens` vs naive delta | [5] output | Whether a bundled offline tokenizer is trustworthy as fallback. | ❓ pending — need the actual numbers (string/message/naive) |
+| 6 | `github.copilot.advanced` + lock scope | [3] output | Which knobs are centrally managed vs. ours to set. | ❓ pending |
+| 7 | Custom mode support (≥ 1.102, "Configure Chat Modes") | [6] output | Ship the Lean mode now or gate it. | ✅ **Confirmed OK** — VS Code 1.137.0, "Configure Chat Modes/Agents" command present. Ship the Lean mode unconditionally for this org. |
+| 8 | Content exclusions in effect | open large/vendored files | Advisory‑only OK, or org expects us to drive exclusions. | ❓ pending |
+| 9 | Restricted Mode default + spike still works | [1] says `RESTRICTED … works` | Confirms `untrustedWorkspaces: supported` suffices. | ❓ pending |
+| 10 | Offline behaviour | disconnect, re‑run | [1][2][3] pass; [4][5] fail *fast*. A hang is a Phase 1 bug. | ❓ pending |
+| 11 | Auth proxy | note `http.proxy` / `http.proxySupport` | Confirms the real extension needs zero HTTP of its own. | ❓ pending |
+| 12 | Deployed VS Code version | Help → About | Confirms `^1.95.0` and whether ≥ 1.102 features exist. | ✅ **1.137.0** — comfortably above both floors. |
+| 13 | Native cost UI available | model picker cost tier? response‑hover cost? Agent Debug Logs → Cache Explorer? | If present, our ledger *links to* them instead of estimating; if stripped in the org build, our estimate matters more. | ❓ pending |
 
 ---
 
