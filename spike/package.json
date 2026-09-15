@@ -23,6 +23,24 @@
     }
   },
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "contextprune",
+          "title": "ContextPrune",
+          "icon": "images/activitybar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "contextprune": [
+        {
+          "id": "contextprune.spike.sidebar",
+          "name": "Dashboard",
+          "type": "webview"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "contextprune.spike.runDiagnostics",

@@ -21,13 +21,19 @@ Plus a `@contextprune-spike` chat participant that counts your prompt's tokens l
 `@contextprune-spike /callmodel <prompt>` which also does one real `sendRequest` round-trip
 (that one uses Copilot quota).
 
-## Beyond diagnostics: benchmark, dashboard, sign-in
+## Beyond diagnostics: an Activity Bar icon, benchmark, dashboard, sign-in
+
+Click the **ContextPrune icon in the Activity Bar** (the vertical icon strip on the far left,
+same place GitLens/Docker/etc. put theirs) — no command needed. It opens a compact sidebar
+view: your GitHub identity (once signed in), runs logged, avg. output-token change, est. $
+saved, a per-project breakdown, and buttons to run another benchmark or open the full
+dashboard as an editor tab.
 
 | Command | What it does | Uses quota / network? |
 |---|---|---|
 | **ContextPrune Spike: Run Token-Savings Benchmark** | Sends 3 fixed tasks to the same live model twice (plain vs. a terse instruction), measures real `countTokens` on the real responses, saves the result locally. **Asks for confirmation first** — see [What data it sends](#what-data-it-sends) below. | Yes — 6 real Copilot requests, confirmed before sending |
-| **ContextPrune Spike: Open Dashboard** | A real webview reading the local run history: summary tiles, a by-project breakdown, recent runs. Empty until you've run the benchmark at least once. | No |
-| **ContextPrune Spike: Sign in with GitHub** | Personalizes the dashboard ("Hi \<name\>") via VS Code's **built-in** GitHub auth broker — `read:user` scope only, never repo/write access, never fires without you clicking it. Works with github.com/GHEC or GHES (`github-enterprise.uri`). Everything else works fully signed-out. | Only if you click it — via VS Code's own auth flow, not this extension |
+| **ContextPrune Spike: Open Dashboard** | The full-size webview (editor tab): summary tiles, a by-project table, recent runs. Same data as the sidebar, more of it. Empty until you've run the benchmark at least once. | No |
+| **ContextPrune Spike: Sign in with GitHub** | Personalizes both the sidebar and dashboard ("Hi \<name\>") via VS Code's **built-in** GitHub auth broker — `read:user` scope only, never repo/write access, never fires without you clicking it. Works with github.com/GHEC or GHES (`github-enterprise.uri`). Everything else works fully signed-out. | Only if you click it — via VS Code's own auth flow, not this extension |
 
 ### What data it sends
 

@@ -338,12 +338,21 @@ This gives you a **real number, from your own org's models, today** — "on 3 re
 tasks, terse instructions cut output tokens by N% and estimated cost by $Y" — to open a
 conversation with your org, ahead of the full dashboard.
 
-### Dashboard — a real webview now exists in the spike
+### Dashboard — an Activity Bar entry point, not just a command
 
-`ContextPrune Spike: Open Dashboard` opens an actual `vscode.window.createWebviewPanel`, not
-a mockup, styled with VS Code's own theme variables (`--vscode-*`) so it matches the user's
-real light/dark/high‑contrast theme rather than a fixed palette. It reads a **local,
-per‑project history file** and renders:
+Real extensions aren't opened by remembering a Command Palette string — clicking an icon in
+the **Activity Bar** (the vertical strip on the far left; same place GitLens, Docker, etc. put
+theirs) is the expected entry point. The spike now contributes exactly that:
+`contributes.viewsContainers.activitybar` + `contributes.views` (a `type: "webview"` view),
+backed by a `vscode.WebviewViewProvider`. Clicking the icon reveals a **compact sidebar**
+(greeting, 3 stat tiles, top projects, "Run benchmark" / "Open full dashboard" buttons) — no
+command needed. `ContextPrune Spike: Open Dashboard` still exists and opens the **full**
+editor‑tab webview for the detailed by‑project table; the two share the same data and refresh
+each other. The Activity Bar icon itself must be a **monochrome SVG** (`images/activitybar-icon.svg`)
+— VS Code re‑tints it per theme — unlike the marketplace `icon` field, which must be PNG.
+
+Both webviews are styled with VS Code's own theme variables (`--vscode-*`), not a mockup, and
+read a **local, per‑project history file**. The full dashboard renders:
 
 1. **Summary tiles** — runs logged, tasks benchmarked, avg. output‑token change, est. $ saved
    to date.

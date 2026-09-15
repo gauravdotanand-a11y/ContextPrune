@@ -67,6 +67,7 @@ const LEAN_INSTRUCTION =
 /** Set once in activate(); every helper below reads global storage / extensionUri through this. */
 let EXTENSION_CONTEXT: vscode.ExtensionContext;
 let dashboardPanel: vscode.WebviewPanel | undefined;
+let sidebarProvider: DashboardSidebarProvider | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   EXTENSION_CONTEXT = context;
@@ -88,6 +89,15 @@ export function activate(context: vscode.ExtensionContext): void {
       'contextprune.spike.signInWithGithub',
       signInWithGithub,
     ),
+  );
+
+  // The Activity Bar entry ("contextprune", package.json viewsContainers) — clicking its
+  // icon reveals this sidebar view directly, no command needed, same pattern GitLens/Docker/
+  // etc. use. Kept deliberately compact; "Open Full Dashboard" hands off to the editor-tab
+  // webview panel for the detailed by-project table.
+  sidebarProvider = new DashboardSidebarProvider();
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider('contextprune.spike.sidebar', sidebarProvider),
   );
 
   const participant = vscode.chat.createChatParticipant(
@@ -436,7 +446,7 @@ async function runBenchmark(): Promise<void> {
   };
   await appendHistory(record);
   log(`\nSaved locally under project "${record.project}" — open "ContextPrune Spike: Open Dashboard" to see it.`);
-  await updateDashboardPanel();
+  await refreshDashboards();
 
   void vscode.window.showInformationMessage(
     `Benchmark done: output tokens ${outPct >= 0 ? '-' : '+'}${Math.abs(outPct)}% with terse ` +
@@ -588,7 +598,7 @@ async function signInWithGithub(): Promise<void> {
         'requests write or repo access).',
     );
   }
-  await updateDashboardPanel();
+  await refreshDashboards();
 }
 
 // ---------------------------------------------------------------------------
@@ -619,12 +629,43 @@ async function openDashboard(): Promise<void> {
       }
     });
   }
-  await updateDashboardPanel();
+  await refreshDashboards();
 }
 
-async function updateDashboardPanel(): Promise<void> {
-  if (!dashboardPanel) return;
-  dashboardPanel.webview.html = await renderDashboardHtml();
+async function refreshDashboards(): Promise<void> {
+  if (dashboardPanel) {
+    dashboardPanel.webview.html = await renderDashboardHtml();
+  }
+  await sidebarProvider?.refresh();
+}
+
+/**
+ * The Activity Bar sidebar view (package.json contributes.views → "contextprune").
+ * Deliberately compact — narrow-column friendly, no wide tables — with a button that
+ * opens the full editor-tab dashboard (createWebviewPanel above) for the detailed view.
+ */
+class DashboardSidebarProvider implements vscode.WebviewViewProvider {
+  private view: vscode.WebviewView | undefined;
+
+  resolveWebviewView(webviewView: vscode.WebviewView): void {
+    this.view = webviewView;
+    webviewView.webview.options = { enableScripts: true };
+    webviewView.webview.onDidReceiveMessage(async (msg: { type?: string }) => {
+      if (msg?.type === 'signIn') {
+        await signInWithGithub();
+      } else if (msg?.type === 'runBenchmark') {
+        await vscode.commands.executeCommand('contextprune.spike.runBenchmark');
+      } else if (msg?.type === 'openFull') {
+        await vscode.commands.executeCommand('contextprune.spike.openDashboard');
+      }
+    });
+    void this.refresh();
+  }
+
+  async refresh(): Promise<void> {
+    if (!this.view) return;
+    this.view.webview.html = await renderSidebarHtml();
+  }
 }
 
 function escapeHtml(s: string): string {
@@ -783,6 +824,106 @@ async function renderDashboardHtml(): Promise<string> {
         stable ID across clones/renames of the same repo). Cost figures assume fresh-input
         pricing with no cache credit — see Plans.md §6 for the full measurement methodology.</p>
     ${dashboardScript(nonce)}</body></html>`;
+}
+
+/** Compact CSS for the narrow Activity Bar sidebar — a vertical stack, no wide tables. */
+function sidebarCss(): string {
+  return `
+    body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
+      background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+      padding: 14px 12px 20px; font-size: 12.5px; }
+    .greet { margin-bottom: 14px; }
+    .greet b { display: block; font-size: 13px; margin-bottom: 2px; }
+    .muted { color: var(--vscode-descriptionForeground); font-size: 11px; }
+    button { width: 100%; background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground); border: none; padding: 7px 10px;
+      border-radius: 4px; cursor: pointer; font-size: 12px; margin-top: 8px; }
+    button:hover { background: var(--vscode-button-hoverBackground); }
+    button.secondary { background: var(--vscode-button-secondaryBackground, transparent);
+      color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+      border: 1px solid var(--vscode-panel-border); }
+    .tiles { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 4px; }
+    .tile { border: 1px solid var(--vscode-panel-border); border-radius: 5px; padding: 8px 10px; }
+    .tile .label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+      color: var(--vscode-descriptionForeground); margin-bottom: 3px; }
+    .tile .value { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .tile .value.accent { color: var(--vscode-charts-green); }
+    .proj { display: flex; justify-content: space-between; padding: 4px 0;
+      border-bottom: 1px solid var(--vscode-panel-border); font-size: 11.5px; }
+    .proj:last-child { border-bottom: none; }
+    h4 { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+      color: var(--vscode-descriptionForeground); margin: 16px 0 6px; }
+  `;
+}
+
+function sidebarScript(nonce: string): string {
+  return `<script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    document.getElementById('signInBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'signIn' }));
+    document.getElementById('runBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'runBenchmark' }));
+    document.getElementById('openFullBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'openFull' }));
+  </script>`;
+}
+
+async function renderSidebarHtml(): Promise<string> {
+  const history = await loadHistory();
+  const session = await getGithubSession(false);
+  const nonce = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+  const csp =
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; ` +
+    `style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">`;
+
+  const greetingHtml = session
+    ? `<div class="greet"><b>Hi ${escapeHtml(session.account.label)}</b><span class="muted">read:user only</span></div>`
+    : `<div class="greet"><span class="muted">Not signed in</span>` +
+      `<button id="signInBtn">Sign in with GitHub</button></div>`;
+
+  if (history.length === 0) {
+    return `<!doctype html><html><head><meta charset="utf-8">${csp}<style>${sidebarCss()}</style></head>
+      <body>${greetingHtml}
+        <p class="muted">No benchmark runs saved yet on this machine.</p>
+        <button id="runBtn">Run Benchmark</button>
+      ${sidebarScript(nonce)}</body></html>`;
+  }
+
+  const byProject = new Map<string, BenchmarkRecord[]>();
+  for (const r of history) {
+    const list = byProject.get(r.project) ?? [];
+    list.push(r);
+    byProject.set(r.project, list);
+  }
+  const totalRuns = history.length;
+  const avgOutputPct = Math.round(history.reduce((s, r) => s + r.totals.outputPct, 0) / totalRuns);
+  const anyPricing = history.some((r) => r.totals.pricingKnown);
+  const totalSaved = history.reduce(
+    (s, r) => s + (r.totals.pricingKnown ? r.totals.baselineCost - r.totals.leanCost : 0),
+    0,
+  );
+
+  const projectRows = [...byProject.entries()]
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 6)
+    .map(([project, records]) => {
+      const avgPct = Math.round(records.reduce((s, r) => s + r.totals.outputPct, 0) / records.length);
+      return `<div class="proj"><span>${escapeHtml(project)}</span>` +
+        `<span class="muted">${records.length} run${records.length === 1 ? '' : 's'} · ${avgPct}%</span></div>`;
+    })
+    .join('');
+
+  return `<!doctype html><html><head><meta charset="utf-8">${csp}<style>${sidebarCss()}</style></head>
+    <body>${greetingHtml}
+      <div class="tiles">
+        <div class="tile"><div class="label">Runs logged</div><div class="value">${totalRuns}</div></div>
+        <div class="tile"><div class="label">Avg. output-token change</div>
+          <div class="value accent">${avgOutputPct >= 0 ? '−' : '+'}${Math.abs(avgOutputPct)}%</div></div>
+        <div class="tile"><div class="label">Est. saved to date</div>
+          <div class="value">${anyPricing ? '$' + totalSaved.toFixed(5) : 'unknown'}</div></div>
+      </div>
+      <h4>By project</h4>
+      ${projectRows}
+      <button id="openFullBtn" class="secondary">Open Full Dashboard</button>
+      <button id="runBtn">Run Another Benchmark</button>
+    ${sidebarScript(nonce)}</body></html>`;
 }
 
 // ---------------------------------------------------------------------------
