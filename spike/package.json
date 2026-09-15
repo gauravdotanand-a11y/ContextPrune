@@ -1,0 +1,57 @@
+{
+  "name": "contextprune-spike",
+  "displayName": "ContextPrune Spike",
+  "description": "Phase 0 API de-risking spike. Throwaway — not the real extension.",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "contextprune",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "contextprune.spike.runDiagnostics",
+        "title": "ContextPrune Spike: Run API Diagnostics"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "contextprune.spike",
+        "name": "contextprune-spike",
+        "fullName": "ContextPrune Spike",
+        "description": "Counts tokens for your prompt to verify the LM + Chat APIs.",
+        "isSticky": false,
+        "commands": [
+          {
+            "name": "callmodel",
+            "description": "Also send a minimal request to the model (consumes Copilot quota)"
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies -o contextprune-spike.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.5.4"
+  }
+}
