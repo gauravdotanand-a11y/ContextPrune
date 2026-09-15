@@ -68,16 +68,24 @@ In the new Extension Development Host window:
 
 ## Run it as a `.vsix` (matches real deployment)
 
+`@vscode/vsce` is a `devDependency` (pinned to `^3`, since the current `@vscode/vsce@4`
+requires Node ≥ 22 and crashes on Node 20 with `ERR_REQUIRE_ESM` — pin stays until this
+machine's Node is upgraded or vsce's ESM dependency issue is fixed upstream).
+
 ```bash
 cd spike
 npm install
 npm run compile
-npx --yes @vscode/vsce package --no-dependencies -o contextprune-spike.vsix
+npm run package        # → contextprune-spike.vsix
 code --install-extension contextprune-spike.vsix
 ```
 
-> In an air-gapped org, `vsce` and the npm deps must come from your internal registry/mirror.
-> If sideloading is blocked by policy, that itself is a finding — note it.
+This is also the only way to actually **see the `package.json` icon** (in the Extensions
+view) — it never renders under F5. The Activity Bar icon and the chat participant icon show
+up either way.
+
+> In an air-gapped org, the npm deps must come from your internal registry/mirror. If
+> sideloading a `.vsix` is blocked by policy, that itself is a finding — note it.
 
 ## Offline test
 
