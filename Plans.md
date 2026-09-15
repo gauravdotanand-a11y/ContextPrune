@@ -236,7 +236,7 @@ assumption anywhere; always read `model.maxInputTokens` live.
 
 | Feature | Description | Deps |
 |---|---|---|
-| **Terse‑output presets** | One command to add vetted brevity rules ("code only unless asked", "bullet points, no preamble/summary") to `copilot-instructions.md` and/or the shipped Lean mode. Diff preview. | — |
+| **Terse‑output presets** | One command to add vetted brevity rules ("code only unless asked", "bullet points, no preamble/summary") to `copilot-instructions.md` and/or the shipped Lean mode. Diff preview. **✅ built in spike** (`applyTerseInstructions`). | — |
 | **Participant output guard** | `@contextprune`'s own system prompt enforces code‑only / short‑answer; optional hard `maxOutputTokens`. | `vscode.lm` |
 | **Prompt linter** | Rule catalogue (superset of the prior‑art tool's 12): filler / pleasantries, multi‑task prompt, missing `#file:` reference, undefined output format, vague terms, ambiguous pronouns, missing stop condition, unclear success criteria, mixed research + implementation, unsafe agent config, likely‑long answer. | local tokenizer |
 | **Rewrite → Open in Chat** | One command: take the current selection / a scratch input, produce a compressed imperative version + estimated token delta, and open it in Copilot Chat (or hand to `@contextprune`). Low‑friction alternative to the participant. | local tokenizer |
@@ -253,7 +253,7 @@ assumption anywhere; always read `model.maxInputTokens` live.
 
 | Feature | Description | Deps |
 |---|---|---|
-| **Smart tab manager** | Keep only *N* relevant editors (`contextprune.maxOpenTabs`, default 5); LRU + pin‑aware; Focus mode stashes/restores. | Tabs API |
+| **Smart tab manager** | Keep only *N* relevant editors (`contextprune.maxOpenTabs`, default 5); LRU + pin‑aware; Focus mode stashes/restores. **Reviewed‑close version ✅ built in spike** (`reviewOpenTabs` — lists real `countTokens` per tab, user picks what to close); the automatic LRU/Focus‑mode version is not built. | Tabs API |
 | **Contextual Copilot toggling** | Scope `github.copilot.enable` / `editor.inlineSuggest.enabled` off for big / minified / generated files, non‑code langs, comment‑only regions, diff editors, active debug. **Detect either `GitHub.copilot` or `GitHub.copilot-chat`** — confirmed live that some orgs ship chat‑only, with completions folded into `copilot-chat`; don't assume the classic extension id exists. | settings API |
 | **Exclusion assistant** | Scan for large/vendored dirs; propose `files.exclude` + `search.exclude` + a draft content‑exclusion YAML; lint existing. | fs scan |
 | **"Prefer completions" nudge** | When a chat request looks like something Tab completion / NES could do, gently say so. Onboarding covers it too. | heuristic |
@@ -263,7 +263,7 @@ assumption anywhere; always read `model.maxInputTokens` live.
 | Feature | Description | Deps |
 |---|---|---|
 | **`contextprune_retrieve` tool** | Returns a minimal ranked de‑duplicated context slice so the agent avoids whole‑file reads / broad greps. | `languageModelTools`, `prompt-tsx` |
-| **"ContextPrune Lean" custom mode** | Shipped `.agent.md`: terse instructions, minimal `tools:` allowlist, low‑cost `model:`. Version‑gated ≥ 1.102. | custom‑mode support |
+| **"ContextPrune Lean" custom mode** | Shipped `.agent.md`: terse instructions, minimal `tools:` allowlist, low‑cost `model:`. Version‑gated ≥ 1.102. **✅ built in spike** (`addLeanMode`, writes `.github/agents/contextprune-lean.agent.md`; model pinned via the `contextprune.leanMode.model` setting since every org's model list differs). | custom‑mode support |
 | **Tool / MCP hygiene report** | List enabled tools + MCP servers with estimated schema‑token overhead (~250 tok/tool/request rule of thumb); recommend disabling unused; deep‑link to "Configure Tools". | tools API |
 | **Run guardrails** | Warn when a working set or single agent run crosses a configurable token / step budget. | editor APIs, ledger |
 
@@ -455,7 +455,8 @@ uses the same PNG rather than a generic `ThemeIcon`, so branding is visible in F
 | Phase | Goal | Deliverable |
 |---|---|---|
 | **0 — Spike (~1 wk)** | De‑risk APIs | `countTokens`, `selectChatModels` (+ enumerate models), participant registration, `github.copilot.*` read, tab enumeration, custom‑mode detection — in Restricted Mode **and** offline. **Scaffolded → [`spike/`](spike/), compiles clean, `engines ^1.95.0`. Ran in the org — see §11.** |
-| **0.5 — Proof (this session)** | A showcase‑ready number, fast | **Benchmark mode** (real, org‑specific, before/after token counts) → **local per‑project history** → a **real dashboard webview** reading it (not just a mockup) → optional **"Hi \<name\>"** via VS Code's built‑in GitHub auth → **branded icon** wired into both the extension listing and the chat participant. All shipped this session — see §6. A separate **visual‑design mockup** remains the target for Phase 1's polish pass. |
+| **0.5 — Proof (this session)** | A showcase‑ready number, fast | **Benchmark mode** → **local per‑project history** → a **real dashboard + Activity Bar sidebar** reading it → optional **"Hi \<name\>"** via VS Code's built‑in GitHub auth → **branded icon**. See §6. |
+| **0.6 — First real interventions (this session)** | Stop being measurement‑only | Three commands that **edit real files, with a diff preview**: `applyTerseInstructions` (writes `.github/copilot-instructions.md`), `addLeanMode` (writes `.github/agents/contextprune-lean.agent.md`), `reviewOpenTabs` (closes user‑picked tabs). This is Pillars 2/4/5 made real, ahead of Phase 1 — a manually‑triggered, diff‑confirmed first cut, not the full automatic rule engine those pillars describe. |
 | **1 — Measure + Output discipline** | Visibility + the cheapest big win | Token HUD, **real dashboard webview** (built from the Proof spec), cost ledger (per mode / token type, with/without tagging), instructions budget report, per‑file lens, terse‑output presets, prompt linter. Local tokenizer. Ship `.vsix`. |
 | **2 — Reduce inline** | Cut wasted inline requests | Smart tab manager, contextual toggling, exclusion assistant, "prefer completions" nudge. |
 | **3 — Chat + cache + Agent** | Ask path, cache hygiene, Agent hooks | `@contextprune` participant, cache‑buster warnings, cache‑friendly ordering, history nudge, cache‑aware model downshift, `/trim` + `contextprune_retrieve` tools, "Lean" custom mode, tool/MCP hygiene report, `prompt-tsx`. |

@@ -49,6 +49,19 @@ per-extension data directory on disk — not the workspace, not synced, not uplo
 by project, which is currently just the first workspace folder's **name** (not yet a stable
 id across clones).
 
+## Interventions — the part that actually saves tokens
+
+Everything above is measurement. These three commands (also buttons in the sidebar and
+dashboard, under "Reduce tokens now") **edit real files in your real workspace**, and change
+what happens on every future Copilot request there — not just benchmark calls. Every one shows
+a **diff preview** and asks "Apply?" before writing anything; nothing is silent or automatic.
+
+| Command | What it writes | Effect |
+|---|---|---|
+| **Apply Terse-Output Instructions** | Appends a brevity rule to `.github/copilot-instructions.md` | Applies to *every* Copilot Chat/Agent request in this repo, for everyone who opens it, from the moment it's saved |
+| **Add "ContextPrune Lean" Custom Mode** | Creates `.github/agents/contextprune-lean.agent.md` (terse instructions + a pinned cheap model + a minimal tool list) | Selectable from the chat mode dropdown once VS Code picks it up; needs ≥ 1.102 (see check 6). Edit `contextprune.leanMode.model` first if the default (`gpt-5-mini`) isn't in your org's model list — check "Run API Diagnostics" |
+| **Review Open Tabs** | Nothing on disk — closes tabs you pick | Lists every open text tab with a real `countTokens` estimate, lets you multi-select which to close. Fewer/more-relevant open tabs = a smaller "neighboring tabs" pool for inline completions |
+
 ## Run it (F5 path — no packaging)
 
 ```bash

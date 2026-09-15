@@ -62,8 +62,35 @@
       {
         "command": "contextprune.spike.signInWithGithub",
         "title": "ContextPrune Spike: Sign in with GitHub"
+      },
+      {
+        "command": "contextprune.spike.applyTerseInstructions",
+        "title": "ContextPrune Spike: Apply Terse-Output Instructions"
+      },
+      {
+        "command": "contextprune.spike.addLeanMode",
+        "title": "ContextPrune Spike: Add \"ContextPrune Lean\" Custom Mode"
+      },
+      {
+        "command": "contextprune.spike.reviewOpenTabs",
+        "title": "ContextPrune Spike: Review Open Tabs"
       }
     ],
+    "configuration": {
+      "title": "ContextPrune",
+      "properties": {
+        "contextprune.leanMode.model": {
+          "type": "string",
+          "default": "gpt-5-mini",
+          "markdownDescription": "Model family id pinned in the generated `.github/agents/contextprune-lean.agent.md` file. Must be one of the family ids your org's own `Run API Diagnostics` returned — every org's model list differs. Regenerate the file (`ContextPrune Spike: Add \"ContextPrune Lean\" Custom Mode`) after changing this."
+        },
+        "contextprune.maxOpenTabs": {
+          "type": "number",
+          "default": 5,
+          "description": "Advisory only, shown in 'Review Open Tabs' — the number of open text tabs above which Copilot's 'neighboring tabs' inline-completion context starts getting noisy."
+        }
+      }
+    },
     "chatParticipants": [
       {
         "id": "contextprune.spike",

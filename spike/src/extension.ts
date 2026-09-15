@@ -89,6 +89,18 @@ export function activate(context: vscode.ExtensionContext): void {
       'contextprune.spike.signInWithGithub',
       signInWithGithub,
     ),
+    vscode.commands.registerCommand(
+      'contextprune.spike.applyTerseInstructions',
+      applyTerseInstructions,
+    ),
+    vscode.commands.registerCommand(
+      'contextprune.spike.addLeanMode',
+      addLeanMode,
+    ),
+    vscode.commands.registerCommand(
+      'contextprune.spike.reviewOpenTabs',
+      reviewOpenTabs,
+    ),
   );
 
   // The Activity Bar entry ("contextprune", package.json viewsContainers) — clicking its
@@ -481,6 +493,211 @@ async function runVariant(
 }
 
 // ---------------------------------------------------------------------------
+// Interventions — the part that actually changes token usage in real projects, not
+// just measures it. Every one of these edits a real file in the workspace, always
+// with a diff preview and an explicit "Apply" confirmation — never silent, never
+// automatic. This is Pillar 2 / Pillar 4 / Pillar 5 from Plans.md §5, made real.
+// ---------------------------------------------------------------------------
+
+async function readFileIfExists(uri: vscode.Uri): Promise<string> {
+  try {
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    return Buffer.from(bytes).toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+async function writeFileEnsuringDir(uri: vscode.Uri, content: string): Promise<void> {
+  await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
+  await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
+}
+
+/** Shows a diff between what's on disk now and what we'd write, and asks before applying. */
+async function showDiffAndConfirm(
+  title: string,
+  existingContent: string,
+  proposedContent: string,
+): Promise<boolean> {
+  if (existingContent.trim() === proposedContent.trim()) {
+    void vscode.window.showInformationMessage(`ContextPrune: ${title} is already up to date.`);
+    return false;
+  }
+  const leftDoc = await vscode.workspace.openTextDocument({
+    content: existingContent,
+    language: 'markdown',
+  });
+  const rightDoc = await vscode.workspace.openTextDocument({
+    content: proposedContent,
+    language: 'markdown',
+  });
+  await vscode.commands.executeCommand(
+    'vscode.diff',
+    leftDoc.uri,
+    rightDoc.uri,
+    `ContextPrune: ${title} (proposed)`,
+  );
+  const choice = await vscode.window.showInformationMessage(
+    `Apply this change to ${title}?`,
+    { modal: true },
+    'Apply',
+  );
+  return choice === 'Apply';
+}
+
+const TERSE_INSTRUCTIONS_BLOCK =
+  '## ContextPrune — token discipline\n\n' +
+  'Be concise. Code only unless asked for an explanation. No preamble, no summary, ' +
+  'no restating the task.\n';
+
+/**
+ * Pillar 2 — writes the one instruction that the benchmark measured as the single
+ * highest-leverage lever directly into the real, repo-wide instructions file. This
+ * applies to every Copilot Chat / Agent request in this repo from the moment it's
+ * saved — not just benchmark calls.
+ */
+async function applyTerseInstructions(): Promise<void> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    void vscode.window.showErrorMessage('ContextPrune: open a workspace folder first.');
+    return;
+  }
+  const uri = vscode.Uri.joinPath(folder.uri, '.github', 'copilot-instructions.md');
+  const existing = await readFileIfExists(uri);
+  const proposed = existing.trim().length > 0
+    ? `${existing.trimEnd()}\n\n${TERSE_INSTRUCTIONS_BLOCK}`
+    : TERSE_INSTRUCTIONS_BLOCK;
+
+  const approved = await showDiffAndConfirm('.github/copilot-instructions.md', existing, proposed);
+  if (!approved) return;
+
+  await writeFileEnsuringDir(uri, proposed);
+  void vscode.window.showInformationMessage(
+    'Updated .github/copilot-instructions.md — applies to every Copilot Chat/Agent request ' +
+      'in this repo from now on, for everyone who opens it.',
+  );
+  await refreshDashboards();
+}
+
+/**
+ * Pillar 5 — a checked-in custom agent file (VS Code >= 1.102; see Plans.md §2/§3):
+ * terse instructions + a cheap pinned model + a minimal tool list, selectable from the
+ * chat mode dropdown. `contextprune.leanMode.model` should be one of the real family
+ * ids the org's own "Run API Diagnostics" returned — the default here is a cheap one
+ * confirmed present in the spike's own test run, but every org's model list differs.
+ */
+function leanModeContent(): string {
+  const model = vscode.workspace
+    .getConfiguration('contextprune')
+    .get<string>('leanMode.model', 'gpt-5-mini');
+  return `---
+name: ContextPrune Lean
+description: Token-minimized mode — terse output, minimal tools, a cheap model.
+model: ${model}
+tools: ['edit', 'search', 'runCommands']
+---
+
+Be concise. Code only unless asked for an explanation. No preamble, no summary, no
+restating the task. Prefer editing existing code over regenerating whole files. Ask
+before broad repository-wide searches or reading many files — retrieve only what's
+needed for the current step.
+`;
+}
+
+async function addLeanMode(): Promise<void> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    void vscode.window.showErrorMessage('ContextPrune: open a workspace folder first.');
+    return;
+  }
+  const uri = vscode.Uri.joinPath(folder.uri, '.github', 'agents', 'contextprune-lean.agent.md');
+  const existing = await readFileIfExists(uri);
+  const proposed = leanModeContent();
+
+  const approved = await showDiffAndConfirm(
+    '.github/agents/contextprune-lean.agent.md',
+    existing,
+    proposed,
+  );
+  if (!approved) return;
+
+  await writeFileEnsuringDir(uri, proposed);
+  void vscode.window.showInformationMessage(
+    'Created .github/agents/contextprune-lean.agent.md — pick "ContextPrune Lean" from the ' +
+      'chat mode dropdown to use it. If the pinned model isn\'t right for your org, edit the ' +
+      '`model:` line or set contextprune.leanMode.model and regenerate.',
+  );
+  await refreshDashboards();
+}
+
+/**
+ * Pillar 4 (manual, reviewed version — no background rule engine yet) — lists every
+ * open text tab with a real token estimate (countTokens when a model's available, a
+ * naive chars/4 fallback otherwise) and lets the user pick which to close. Open tabs
+ * are a primary "neighboring tabs" signal for inline completions (Plans.md §2) — this
+ * doesn't touch Copilot's own prompt, it just shrinks the pool it draws from.
+ */
+async function reviewOpenTabs(): Promise<void> {
+  const textTabs: { tab: vscode.Tab; uri: vscode.Uri }[] = [];
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      if (tab.input instanceof vscode.TabInputText) {
+        textTabs.push({ tab, uri: tab.input.uri });
+      }
+    }
+  }
+  if (textTabs.length === 0) {
+    void vscode.window.showInformationMessage('ContextPrune: no open text tabs to review.');
+    return;
+  }
+
+  let model: vscode.LanguageModelChat | undefined;
+  try {
+    const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+    model = models.find(
+      (m) => m.maxInputTokens > 0 && !NON_USER_FACING_FAMILIES.has(m.family) && m.id !== 'auto',
+    );
+  } catch {
+    model = undefined; // fall back to the naive estimate below
+  }
+
+  type TabEntry = { tab: vscode.Tab; label: string; tokens: number };
+  const entries: TabEntry[] = [];
+  for (const { tab, uri } of textTabs) {
+    let tokens = 0;
+    try {
+      const doc = await vscode.workspace.openTextDocument(uri);
+      const text = doc.getText();
+      tokens = model ? await model.countTokens(text) : Math.ceil(text.length / 4);
+    } catch {
+      // unreadable tab (e.g. a virtual/output document) — leave at 0, still listed
+    }
+    entries.push({ tab, label: vscode.workspace.asRelativePath(uri), tokens });
+  }
+  entries.sort((a, b) => b.tokens - a.tokens);
+
+  const maxOpen = vscode.workspace.getConfiguration('contextprune').get<number>('maxOpenTabs', 5);
+  const totalTokens = entries.reduce((s, e) => s + e.tokens, 0);
+
+  const items = entries.map((e) => ({
+    label: e.label,
+    description: `~${e.tokens} tokens${e.tab.isActive ? '  ·  active' : ''}`,
+    entry: e,
+  }));
+
+  const picked = await vscode.window.showQuickPick(items, {
+    canPickMany: true,
+    placeHolder:
+      `${entries.length} open text tabs, ~${totalTokens} tokens total ` +
+      `(recommended max: ${maxOpen}). Select tabs to CLOSE, then press Enter.`,
+  });
+  if (!picked || picked.length === 0) return;
+
+  await vscode.window.tabGroups.close(picked.map((p) => p.entry.tab));
+  void vscode.window.showInformationMessage(`Closed ${picked.length} tab(s).`);
+}
+
+// ---------------------------------------------------------------------------
 // Local, per-project history — every benchmark run is appended here. Purely local
 // (VS Code's own extension global-storage folder on disk), never uploaded, never
 // synced. "Project" is the first workspace folder's name — simple and good enough
@@ -621,15 +838,33 @@ async function openDashboard(): Promise<void> {
     dashboardPanel.onDidDispose(() => {
       dashboardPanel = undefined;
     });
-    dashboardPanel.webview.onDidReceiveMessage(async (msg: { type?: string }) => {
-      if (msg?.type === 'signIn') {
-        await signInWithGithub();
-      } else if (msg?.type === 'runBenchmark') {
-        await vscode.commands.executeCommand('contextprune.spike.runBenchmark');
-      }
-    });
+    dashboardPanel.webview.onDidReceiveMessage(handleDashboardMessage);
   }
   await refreshDashboards();
+}
+
+/** Shared by both webviews — the buttons post the same message shape from either one. */
+async function handleDashboardMessage(msg: { type?: string }): Promise<void> {
+  switch (msg?.type) {
+    case 'signIn':
+      await signInWithGithub();
+      break;
+    case 'runBenchmark':
+      await vscode.commands.executeCommand('contextprune.spike.runBenchmark');
+      break;
+    case 'openFull':
+      await vscode.commands.executeCommand('contextprune.spike.openDashboard');
+      break;
+    case 'applyInstructions':
+      await vscode.commands.executeCommand('contextprune.spike.applyTerseInstructions');
+      break;
+    case 'addLeanMode':
+      await vscode.commands.executeCommand('contextprune.spike.addLeanMode');
+      break;
+    case 'reviewTabs':
+      await vscode.commands.executeCommand('contextprune.spike.reviewOpenTabs');
+      break;
+  }
 }
 
 async function refreshDashboards(): Promise<void> {
@@ -650,15 +885,7 @@ class DashboardSidebarProvider implements vscode.WebviewViewProvider {
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
     webviewView.webview.options = { enableScripts: true };
-    webviewView.webview.onDidReceiveMessage(async (msg: { type?: string }) => {
-      if (msg?.type === 'signIn') {
-        await signInWithGithub();
-      } else if (msg?.type === 'runBenchmark') {
-        await vscode.commands.executeCommand('contextprune.spike.runBenchmark');
-      } else if (msg?.type === 'openFull') {
-        await vscode.commands.executeCommand('contextprune.spike.openDashboard');
-      }
-    });
+    webviewView.webview.onDidReceiveMessage(handleDashboardMessage);
     void this.refresh();
   }
 
@@ -690,6 +917,11 @@ function dashboardCss(): string {
     button { background: var(--vscode-button-background); color: var(--vscode-button-foreground);
       border: none; padding: 6px 13px; border-radius: 4px; cursor: pointer; font-size: 12.5px; }
     button:hover { background: var(--vscode-button-hoverBackground); }
+    button.secondary { background: var(--vscode-button-secondaryBackground, transparent);
+      color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+      border: 1px solid var(--vscode-panel-border); }
+    button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground)); }
+    .interventions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 18px; }
     .tile { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 12px 14px; }
     .tile .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
@@ -713,9 +945,23 @@ function dashboardCss(): string {
 function dashboardScript(nonce: string): string {
   return `<script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    document.getElementById('signInBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'signIn' }));
-    document.getElementById('runBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'runBenchmark' }));
+    const wire = (id, type) => document.getElementById(id)?.addEventListener('click', () => vscode.postMessage({ type }));
+    wire('signInBtn', 'signIn');
+    wire('runBtn', 'runBenchmark');
+    wire('applyInstructionsBtn', 'applyInstructions');
+    wire('addLeanModeBtn', 'addLeanMode');
+    wire('reviewTabsBtn', 'reviewTabs');
   </script>`;
+}
+
+/** The three real interventions — each webview is its own document, so plain ids are fine. */
+function interventionsHtml(): string {
+  return `
+    <div class="interventions">
+      <button id="applyInstructionsBtn">Apply Terse-Output Instructions</button>
+      <button id="addLeanModeBtn" class="secondary">Add "ContextPrune Lean" Mode</button>
+      <button id="reviewTabsBtn" class="secondary">Review Open Tabs</button>
+    </div>`;
 }
 
 async function renderDashboardHtml(): Promise<string> {
@@ -736,6 +982,8 @@ async function renderDashboardHtml(): Promise<string> {
   if (history.length === 0) {
     return `<!doctype html><html><head><meta charset="utf-8">${csp}<style>${dashboardCss()}</style></head>
       <body>${topbar}
+        <h3>Actually reduce tokens (do this first — no data needed)</h3>
+        ${interventionsHtml()}
         <div class="empty">
           <p>No benchmark runs saved yet for this machine.</p>
           <button id="runBtn">Run Token-Savings Benchmark</button>
@@ -795,6 +1043,9 @@ async function renderDashboardHtml(): Promise<string> {
 
   return `<!doctype html><html><head><meta charset="utf-8">${csp}<style>${dashboardCss()}</style></head>
     <body>${topbar}
+      <h3>Actually reduce tokens</h3>
+      ${interventionsHtml()}
+
       <div class="stats">
         <div class="tile"><div class="label">Runs logged</div><div class="value">${totalRuns}</div></div>
         <div class="tile"><div class="label">Tasks benchmarked</div><div class="value">${totalTasks}</div></div>
@@ -859,9 +1110,13 @@ function sidebarCss(): string {
 function sidebarScript(nonce: string): string {
   return `<script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    document.getElementById('signInBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'signIn' }));
-    document.getElementById('runBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'runBenchmark' }));
-    document.getElementById('openFullBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'openFull' }));
+    const wire = (id, type) => document.getElementById(id)?.addEventListener('click', () => vscode.postMessage({ type }));
+    wire('signInBtn', 'signIn');
+    wire('runBtn', 'runBenchmark');
+    wire('openFullBtn', 'openFull');
+    wire('applyInstructionsBtn', 'applyInstructions');
+    wire('addLeanModeBtn', 'addLeanMode');
+    wire('reviewTabsBtn', 'reviewTabs');
   </script>`;
 }
 
@@ -881,7 +1136,9 @@ async function renderSidebarHtml(): Promise<string> {
   if (history.length === 0) {
     return `<!doctype html><html><head><meta charset="utf-8">${csp}<style>${sidebarCss()}</style></head>
       <body>${greetingHtml}
-        <p class="muted">No benchmark runs saved yet on this machine.</p>
+        <h4>Reduce tokens now</h4>
+        ${interventionsHtml()}
+        <p class="muted" style="margin-top:14px;">No benchmark runs saved yet on this machine.</p>
         <button id="runBtn">Run Benchmark</button>
       ${sidebarScript(nonce)}</body></html>`;
   }
@@ -921,6 +1178,8 @@ async function renderSidebarHtml(): Promise<string> {
       </div>
       <h4>By project</h4>
       ${projectRows}
+      <h4>Reduce tokens now</h4>
+      ${interventionsHtml()}
       <button id="openFullBtn" class="secondary">Open Full Dashboard</button>
       <button id="runBtn">Run Another Benchmark</button>
     ${sidebarScript(nonce)}</body></html>`;
