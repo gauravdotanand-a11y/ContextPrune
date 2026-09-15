@@ -31,6 +31,14 @@
       {
         "command": "contextprune.spike.runBenchmark",
         "title": "ContextPrune Spike: Run Token-Savings Benchmark"
+      },
+      {
+        "command": "contextprune.spike.openDashboard",
+        "title": "ContextPrune Spike: Open Dashboard"
+      },
+      {
+        "command": "contextprune.spike.signInWithGithub",
+        "title": "ContextPrune Spike: Sign in with GitHub"
       }
     ],
     "chatParticipants": [

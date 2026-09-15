@@ -21,6 +21,28 @@ Plus a `@contextprune-spike` chat participant that counts your prompt's tokens l
 `@contextprune-spike /callmodel <prompt>` which also does one real `sendRequest` round-trip
 (that one uses Copilot quota).
 
+## Beyond diagnostics: benchmark, dashboard, sign-in
+
+| Command | What it does | Uses quota / network? |
+|---|---|---|
+| **ContextPrune Spike: Run Token-Savings Benchmark** | Sends 3 fixed tasks to the same live model twice (plain vs. a terse instruction), measures real `countTokens` on the real responses, saves the result locally. **Asks for confirmation first** — see [What data it sends](#what-data-it-sends) below. | Yes — 6 real Copilot requests, confirmed before sending |
+| **ContextPrune Spike: Open Dashboard** | A real webview reading the local run history: summary tiles, a by-project breakdown, recent runs. Empty until you've run the benchmark at least once. | No |
+| **ContextPrune Spike: Sign in with GitHub** | Personalizes the dashboard ("Hi \<name\>") via VS Code's **built-in** GitHub auth broker — `read:user` scope only, never repo/write access, never fires without you clicking it. Works with github.com/GHEC or GHES (`github-enterprise.uri`). Everything else works fully signed-out. | Only if you click it — via VS Code's own auth flow, not this extension |
+
+### What data it sends
+
+The benchmark sends **only** a small hardcoded sample function plus one of two fixed
+instruction strings — never your real files, open tabs, or `copilot-instructions.md`. See
+`SAMPLE_FUNCTION`, `BENCHMARK_TASKS`, and `LEAN_INSTRUCTION` at the top of
+[`src/extension.ts`](src/extension.ts) for the exact literal text of every one of the 6 calls.
+
+### Where results are stored
+
+`contextprune-history.json` in this extension's global storage folder (VS Code's own
+per-extension data directory on disk — not the workspace, not synced, not uploaded). Grouped
+by project, which is currently just the first workspace folder's **name** (not yet a stable
+id across clones).
+
 ## Run it (F5 path — no packaging)
 
 ```bash

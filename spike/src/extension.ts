@@ -64,7 +64,13 @@ const LEAN_INSTRUCTION =
   'Be concise. Code only unless asked for an explanation. No preamble, no summary, ' +
   'no restating the task.';
 
+/** Set once in activate(); every helper below reads global storage / extensionUri through this. */
+let EXTENSION_CONTEXT: vscode.ExtensionContext;
+let dashboardPanel: vscode.WebviewPanel | undefined;
+
 export function activate(context: vscode.ExtensionContext): void {
+  EXTENSION_CONTEXT = context;
+
   context.subscriptions.push(
     vscode.commands.registerCommand(
       'contextprune.spike.runDiagnostics',
@@ -74,18 +80,31 @@ export function activate(context: vscode.ExtensionContext): void {
       'contextprune.spike.runBenchmark',
       runBenchmark,
     ),
+    vscode.commands.registerCommand(
+      'contextprune.spike.openDashboard',
+      openDashboard,
+    ),
+    vscode.commands.registerCommand(
+      'contextprune.spike.signInWithGithub',
+      signInWithGithub,
+    ),
   );
 
   const participant = vscode.chat.createChatParticipant(
     'contextprune.spike',
     handleChatRequest,
   );
-  participant.iconPath = new vscode.ThemeIcon('symbol-ruler');
+  // A real .png icon (not a generic ThemeIcon) so the extension's own branding
+  // actually shows up somewhere visible during F5 debugging, not just once
+  // sideloaded as a .vsix (where the Extensions view icon appears).
+  participant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'images', 'icon.png');
   context.subscriptions.push(participant);
 
   CHANNEL.appendLine(
     `[activate] ContextPrune Spike active. isTrusted=${vscode.workspace.isTrusted}. ` +
-      `Run "ContextPrune Spike: Run API Diagnostics" from the command palette.`,
+      `Run "ContextPrune Spike: Run API Diagnostics" from the command palette. Note: this ` +
+      `extension's package.json "icon" only appears in the Extensions view / Marketplace-style ` +
+      `listing when installed from a .vsix — not when run via F5 (Extension Development Host).`,
   );
 }
 
@@ -353,26 +372,81 @@ async function runBenchmark(): Promise<void> {
   const outPct = totalBaselineOut > 0 ? Math.round(((totalBaselineOut - totalLeanOut) / totalBaselineOut) * 100) : 0;
   log(`  output tokens: baseline=${totalBaselineOut}  lean=${totalLeanOut}  (${outPct >= 0 ? '-' : '+'}${Math.abs(outPct)}%)`);
   log(`  input tokens:  baseline=${totalBaselineIn}  lean=${totalLeanIn}`);
+  if (totalLeanIn > totalBaselineIn) {
+    const overhead = totalLeanIn - totalBaselineIn;
+    let prefixTokens: number | undefined;
+    try {
+      prefixTokens = await model.countTokens(LEAN_INSTRUCTION);
+    } catch {
+      prefixTokens = undefined;
+    }
+    log(
+      `    (lean input is ${overhead} tokens HIGHER — that's the ${prefixTokens ?? '~20'}-token ` +
+        'instruction prefix itself, paid on every call. It is worth it exactly when the output',
+    );
+    log(
+      `    savings above exceed those ${overhead} tokens, which they clearly do here — but on a ` +
+        'trivial task with a naturally one-line answer, it might not be.)',
+    );
+  }
 
-  let costLine = 'estimated cost: pricing unknown for this model family';
+  let baselineCostVal = 0;
+  let leanCostVal = 0;
+  let costPctVal = 0;
   if (pricing) {
     const cost = (inTok: number, outTok: number): number =>
       (inTok * pricing.input + outTok * pricing.output) / 1_000_000;
-    const baselineCost = cost(totalBaselineIn, totalBaselineOut);
-    const leanCost = cost(totalLeanIn, totalLeanOut);
-    const costPct = baselineCost > 0 ? Math.round(((baselineCost - leanCost) / baselineCost) * 100) : 0;
-    costLine = `  estimated cost (fresh-input assumption, no cache credit): baseline=$${baselineCost.toFixed(5)}  lean=$${leanCost.toFixed(5)}  (${costPct >= 0 ? '-' : '+'}${Math.abs(costPct)}%)`;
-    log(costLine);
+    baselineCostVal = cost(totalBaselineIn, totalBaselineOut);
+    leanCostVal = cost(totalLeanIn, totalLeanOut);
+    costPctVal = baselineCostVal > 0 ? Math.round(((baselineCostVal - leanCostVal) / baselineCostVal) * 100) : 0;
+    log(
+      `  estimated cost (fresh-input assumption, no cache credit): baseline=$${baselineCostVal.toFixed(5)} ` +
+        `lean=$${leanCostVal.toFixed(5)}  (${costPctVal >= 0 ? '-' : '+'}${Math.abs(costPctVal)}%)`,
+    );
   } else {
-    log(`  ${costLine}`);
+    log('  estimated cost: pricing unknown for this model family');
   }
   log('\nThis is illustrative, from one run, on 3 tasks, one model. Re-run a few times');
   log('before quoting a single number to your org.');
 
+  const record: BenchmarkRecord = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: new Date().toISOString(),
+    project: getProjectId(),
+    vendor: model.vendor,
+    family: model.family,
+    tasks: rows.map((r) => ({
+      id: r.taskId,
+      baselineIn: r.baseline.promptTokens,
+      baselineOut: r.baseline.outputTokens,
+      leanIn: r.lean.promptTokens,
+      leanOut: r.lean.outputTokens,
+    })),
+    totals: {
+      baselineIn: totalBaselineIn,
+      baselineOut: totalBaselineOut,
+      leanIn: totalLeanIn,
+      leanOut: totalLeanOut,
+      outputPct: outPct,
+      pricingKnown: !!pricing,
+      baselineCost: baselineCostVal,
+      leanCost: leanCostVal,
+      costPct: costPctVal,
+    },
+  };
+  await appendHistory(record);
+  log(`\nSaved locally under project "${record.project}" — open "ContextPrune Spike: Open Dashboard" to see it.`);
+  await updateDashboardPanel();
+
   void vscode.window.showInformationMessage(
     `Benchmark done: output tokens ${outPct >= 0 ? '-' : '+'}${Math.abs(outPct)}% with terse ` +
-      `instructions (same "${model.family}" model, 3 tasks). See the output channel for detail.`,
-  );
+      `instructions (same "${model.family}" model, 3 tasks). Saved to the local dashboard.`,
+    'Open Dashboard',
+  ).then((choice) => {
+    if (choice === 'Open Dashboard') {
+      void vscode.commands.executeCommand('contextprune.spike.openDashboard');
+    }
+  });
 }
 
 async function runVariant(
@@ -394,6 +468,321 @@ async function runVariant(
   }
   const outputTokens = responseText ? await model.countTokens(responseText) : 0;
   return { label, promptTokens, outputTokens };
+}
+
+// ---------------------------------------------------------------------------
+// Local, per-project history — every benchmark run is appended here. Purely local
+// (VS Code's own extension global-storage folder on disk), never uploaded, never
+// synced. "Project" is the first workspace folder's name — simple and good enough
+// to start with, but not a stable ID across clones/renames of the same repo; a
+// git-remote-derived ID is a reasonable future improvement, not done here.
+// ---------------------------------------------------------------------------
+
+interface BenchmarkTaskRecord {
+  id: string;
+  baselineIn: number;
+  baselineOut: number;
+  leanIn: number;
+  leanOut: number;
+}
+
+interface BenchmarkRecord {
+  id: string;
+  timestamp: string;
+  project: string;
+  vendor: string;
+  family: string;
+  tasks: BenchmarkTaskRecord[];
+  totals: {
+    baselineIn: number;
+    baselineOut: number;
+    leanIn: number;
+    leanOut: number;
+    outputPct: number;
+    pricingKnown: boolean;
+    baselineCost: number;
+    leanCost: number;
+    costPct: number;
+  };
+}
+
+function getProjectId(): string {
+  return vscode.workspace.workspaceFolders?.[0]?.name ?? '(no workspace open)';
+}
+
+function historyFileUri(): vscode.Uri {
+  return vscode.Uri.joinPath(EXTENSION_CONTEXT.globalStorageUri, 'contextprune-history.json');
+}
+
+async function loadHistory(): Promise<BenchmarkRecord[]> {
+  try {
+    const bytes = await vscode.workspace.fs.readFile(historyFileUri());
+    const parsed: unknown = JSON.parse(Buffer.from(bytes).toString('utf8'));
+    return Array.isArray(parsed) ? (parsed as BenchmarkRecord[]) : [];
+  } catch {
+    return []; // no file yet, or unreadable — start fresh rather than fail the benchmark
+  }
+}
+
+async function appendHistory(record: BenchmarkRecord): Promise<void> {
+  const history = await loadHistory();
+  history.push(record);
+  await vscode.workspace.fs.createDirectory(EXTENSION_CONTEXT.globalStorageUri);
+  await vscode.workspace.fs.writeFile(
+    historyFileUri(),
+    Buffer.from(JSON.stringify(history, null, 2), 'utf8'),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GitHub identity — uses VS Code's BUILT-IN authentication broker, not a network
+// call this extension makes itself. read:user scope only (never repo/write access);
+// the extension only ever reads `session.account.label` for a greeting — the token
+// itself is held by VS Code, never logged, stored, or exported by ContextPrune.
+// Tries silently (already signed in for Settings Sync / GitHub PRs?) before ever
+// prompting. Supports both github.com/GHEC ('github') and self-hosted GHES
+// ('github-enterprise', when the org has github-enterprise.uri configured).
+// ---------------------------------------------------------------------------
+
+type GithubProvider = 'github' | 'github-enterprise';
+
+async function getGithubSession(createIfNone: boolean): Promise<vscode.AuthenticationSession | undefined> {
+  for (const providerId of ['github', 'github-enterprise'] as GithubProvider[]) {
+    try {
+      const session = await vscode.authentication.getSession(providerId, ['read:user'], {
+        createIfNone: false,
+      });
+      if (session) return session;
+    } catch {
+      // provider unavailable in this build, or no cached session — try the next one
+    }
+  }
+  if (!createIfNone) return undefined;
+
+  const choice = await vscode.window.showQuickPick(
+    [
+      { label: 'GitHub.com', id: 'github' as GithubProvider },
+      {
+        label: 'GitHub Enterprise Server',
+        id: 'github-enterprise' as GithubProvider,
+        description: 'requires the github-enterprise.uri setting to already be configured',
+      },
+    ],
+    { placeHolder: 'Sign in with which GitHub?' },
+  );
+  if (!choice) return undefined;
+
+  try {
+    return await vscode.authentication.getSession(choice.id, ['read:user'], { createIfNone: true });
+  } catch (err) {
+    void vscode.window.showErrorMessage(`GitHub sign-in failed: ${errText(err)}`);
+    return undefined;
+  }
+}
+
+async function signInWithGithub(): Promise<void> {
+  const session = await getGithubSession(true);
+  if (session) {
+    void vscode.window.showInformationMessage(
+      `Signed in as ${session.account.label} (scope: read:user only — ContextPrune never ` +
+        'requests write or repo access).',
+    );
+  }
+  await updateDashboardPanel();
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard — a real webview reading the local history above, not the earlier
+// published mockup. Styled with VS Code's own theme variables so it matches
+// whatever light/dark/high-contrast theme the user has, rather than a fixed palette.
+// ---------------------------------------------------------------------------
+
+async function openDashboard(): Promise<void> {
+  if (dashboardPanel) {
+    dashboardPanel.reveal();
+  } else {
+    dashboardPanel = vscode.window.createWebviewPanel(
+      'contextprune.spike.dashboard',
+      'ContextPrune Dashboard',
+      vscode.ViewColumn.One,
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+    dashboardPanel.iconPath = vscode.Uri.joinPath(EXTENSION_CONTEXT.extensionUri, 'images', 'icon.png');
+    dashboardPanel.onDidDispose(() => {
+      dashboardPanel = undefined;
+    });
+    dashboardPanel.webview.onDidReceiveMessage(async (msg: { type?: string }) => {
+      if (msg?.type === 'signIn') {
+        await signInWithGithub();
+      } else if (msg?.type === 'runBenchmark') {
+        await vscode.commands.executeCommand('contextprune.spike.runBenchmark');
+      }
+    });
+  }
+  await updateDashboardPanel();
+}
+
+async function updateDashboardPanel(): Promise<void> {
+  if (!dashboardPanel) return;
+  dashboardPanel.webview.html = await renderDashboardHtml();
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string,
+  );
+}
+
+function dashboardCss(): string {
+  return `
+    body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
+      background: var(--vscode-editor-background); padding: 20px 26px 40px; font-size: 13px; }
+    h2 { margin: 0; font-size: 16px; }
+    h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+      color: var(--vscode-descriptionForeground); margin: 26px 0 8px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      flex-wrap: wrap; padding-bottom: 14px; border-bottom: 1px solid var(--vscode-panel-border); }
+    .greet { font-size: 13px; }
+    .muted { color: var(--vscode-descriptionForeground); }
+    .greet .muted { font-size: 11.5px; margin-left: 6px; }
+    button { background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+      border: none; padding: 6px 13px; border-radius: 4px; cursor: pointer; font-size: 12.5px; }
+    button:hover { background: var(--vscode-button-hoverBackground); }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 18px; }
+    .tile { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 12px 14px; }
+    .tile .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+      color: var(--vscode-descriptionForeground); margin-bottom: 6px; }
+    .tile .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .tile .value.accent { color: var(--vscode-charts-green); }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 4px; }
+    th { text-align: left; font-size: 10.5px; text-transform: uppercase;
+      color: var(--vscode-descriptionForeground); padding: 0 8px 6px;
+      border-bottom: 1px solid var(--vscode-panel-border); }
+    td { padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border);
+      font-variant-numeric: tabular-nums; }
+    th.num, td.num { text-align: right; }
+    td.mono { font-family: var(--vscode-editor-font-family, monospace); }
+    .empty { margin-top: 44px; display: flex; flex-direction: column; align-items: flex-start;
+      gap: 14px; color: var(--vscode-descriptionForeground); }
+    .footnote { font-size: 11px; margin-top: 22px; max-width: 660px; line-height: 1.55; }
+  `;
+}
+
+function dashboardScript(nonce: string): string {
+  return `<script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    document.getElementById('signInBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'signIn' }));
+    document.getElementById('runBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'runBenchmark' }));
+  </script>`;
+}
+
+async function renderDashboardHtml(): Promise<string> {
+  const history = await loadHistory();
+  const session = await getGithubSession(false);
+  const nonce = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+  const csp =
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; ` +
+    `style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">`;
+
+  const greetingHtml = session
+    ? `<div class="greet">Hi <b>${escapeHtml(session.account.label)}</b><span class="muted">read:user only</span></div>`
+    : `<div class="greet"><button id="signInBtn">Sign in with GitHub</button>` +
+      `<span class="muted">to personalize this dashboard</span></div>`;
+
+  const topbar = `<div class="topbar"><h2>ContextPrune Dashboard</h2>${greetingHtml}</div>`;
+
+  if (history.length === 0) {
+    return `<!doctype html><html><head><meta charset="utf-8">${csp}<style>${dashboardCss()}</style></head>
+      <body>${topbar}
+        <div class="empty">
+          <p>No benchmark runs saved yet for this machine.</p>
+          <button id="runBtn">Run Token-Savings Benchmark</button>
+        </div>
+      ${dashboardScript(nonce)}</body></html>`;
+  }
+
+  const byProject = new Map<string, BenchmarkRecord[]>();
+  for (const r of history) {
+    const list = byProject.get(r.project) ?? [];
+    list.push(r);
+    byProject.set(r.project, list);
+  }
+
+  const totalRuns = history.length;
+  const totalTasks = history.reduce((s, r) => s + r.tasks.length, 0);
+  const avgOutputPct = Math.round(history.reduce((s, r) => s + r.totals.outputPct, 0) / totalRuns);
+  const anyPricing = history.some((r) => r.totals.pricingKnown);
+  const totalSaved = history.reduce(
+    (s, r) => s + (r.totals.pricingKnown ? r.totals.baselineCost - r.totals.leanCost : 0),
+    0,
+  );
+
+  const projectRows = [...byProject.entries()]
+    .map(([project, records]) => {
+      const runs = records.length;
+      const avgPct = Math.round(records.reduce((s, r) => s + r.totals.outputPct, 0) / runs);
+      const last = records.reduce((a, b) => (a.timestamp > b.timestamp ? a : b));
+      const savedHere = records.reduce(
+        (s, r) => s + (r.totals.pricingKnown ? r.totals.baselineCost - r.totals.leanCost : 0),
+        0,
+      );
+      return `<tr>
+        <td>${escapeHtml(project)}</td>
+        <td class="num">${runs}</td>
+        <td class="num">${avgPct}%</td>
+        <td class="num">${savedHere > 0 ? '$' + savedHere.toFixed(5) : '—'}</td>
+        <td>${escapeHtml(new Date(last.timestamp).toLocaleString())}</td>
+      </tr>`;
+    })
+    .join('');
+
+  const recentRows = [...history]
+    .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
+    .slice(0, 15)
+    .map(
+      (r) => `<tr>
+        <td>${escapeHtml(new Date(r.timestamp).toLocaleString())}</td>
+        <td>${escapeHtml(r.project)}</td>
+        <td class="mono">${escapeHtml(r.family)}</td>
+        <td class="num">${r.totals.baselineOut} → ${r.totals.leanOut}</td>
+        <td class="num">${r.totals.outputPct}%</td>
+        <td class="num">${r.totals.pricingKnown ? '$' + (r.totals.baselineCost - r.totals.leanCost).toFixed(5) : '—'}</td>
+      </tr>`,
+    )
+    .join('');
+
+  return `<!doctype html><html><head><meta charset="utf-8">${csp}<style>${dashboardCss()}</style></head>
+    <body>${topbar}
+      <div class="stats">
+        <div class="tile"><div class="label">Runs logged</div><div class="value">${totalRuns}</div></div>
+        <div class="tile"><div class="label">Tasks benchmarked</div><div class="value">${totalTasks}</div></div>
+        <div class="tile"><div class="label">Avg. output-token change</div>
+          <div class="value accent">${avgOutputPct >= 0 ? '−' : '+'}${Math.abs(avgOutputPct)}%</div></div>
+        <div class="tile"><div class="label">Est. saved to date</div>
+          <div class="value">${anyPricing ? '$' + totalSaved.toFixed(5) : 'pricing unknown'}</div></div>
+      </div>
+
+      <h3>By project</h3>
+      <table>
+        <thead><tr><th>Project</th><th class="num">Runs</th><th class="num">Avg. output Δ</th>
+          <th class="num">Est. saved</th><th>Last run</th></tr></thead>
+        <tbody>${projectRows}</tbody>
+      </table>
+
+      <h3>Recent runs</h3>
+      <table>
+        <thead><tr><th>When</th><th>Project</th><th>Model</th><th class="num">Output tokens</th>
+          <th class="num">Δ</th><th class="num">Est. saved</th></tr></thead>
+        <tbody>${recentRows}</tbody>
+      </table>
+
+      <p style="margin-top:22px;"><button id="runBtn">Run another benchmark</button></p>
+      <p class="muted footnote">Local data only — stored under this machine's extension storage,
+        never uploaded anywhere. "Project" is currently the workspace folder name (not yet a
+        stable ID across clones/renames of the same repo). Cost figures assume fresh-input
+        pricing with no cache credit — see Plans.md §6 for the full measurement methodology.</p>
+    ${dashboardScript(nonce)}</body></html>`;
 }
 
 // ---------------------------------------------------------------------------

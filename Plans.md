@@ -196,11 +196,22 @@ assumption anywhere; always read `model.maxInputTokens` live.
 
 1. **No new outbound network calls.** All analysis local; only remote traffic is the
    already‑approved Copilot channel via `vscode.lm`. No third‑party servers or keys.
+   **Named exception:** VS Code's **built‑in authentication broker**
+   (`vscode.authentication.getSession('github' | 'github-enterprise', …)`, §6) — used only
+   for the optional "Hi \<name\>" personalization, gated behind an explicit user‑clicked
+   "Sign in" action, `read:user` scope only, and the extension never sees a password and
+   never stores the token (VS Code's own secret storage holds it). Treated as an extension
+   of the already‑trusted platform (the same broker Settings Sync / GitHub PRs use), not a
+   new third‑party dependency — but it's the one place this rule is knowingly relaxed, so
+   it's called out explicitly rather than silently expanded.
 2. **Bundle a local tokenizer** for zero‑network estimates; use `countTokens` when a model +
    consent exist, else label output "estimated".
-3. **No telemetry** — no telemetry code ships at all.
+3. **No telemetry** — no telemetry code ships at all. (Locally‑stored benchmark/ledger history,
+   §6, is not telemetry — it never leaves the machine and nothing reads it but the user.)
 4. **Respect proxy settings**; ideally the extension makes **no** HTTP calls of its own.
 5. **Never persist source code.** In‑memory analysis; reports carry counts + paths, never code.
+   Persisted history (§6) stores only token counts, model ids, timestamps, and a project
+   *name* — never file contents or prompts.
 6. **Minimal capabilities.** Narrow `activationEvents`; `untrustedWorkspaces: supported`;
    Node‑free deps so a web build stays possible.
 7. **Distribution: signed `.vsix` only** (`code --install-extension` / `bootstrap/extensions`).
@@ -327,36 +338,69 @@ This gives you a **real number, from your own org's models, today** — "on 3 re
 tasks, terse instructions cut output tokens by N% and estimated cost by $Y" — to open a
 conversation with your org, ahead of the full dashboard.
 
-### Dashboard — spec (Phase 1 build; mockup available now)
+### Dashboard — a real webview now exists in the spike
 
-A VS Code **webview panel** (`ContextPrune: Open Dashboard`), rendered with hand‑rolled
-inline SVG (no charting‑library CDN — nothing external is allowed to load in a webview in
-this environment; a bundled UMD chart lib is the fallback if hand‑rolled SVG proves
-insufficient). Sections:
+`ContextPrune Spike: Open Dashboard` opens an actual `vscode.window.createWebviewPanel`, not
+a mockup, styled with VS Code's own theme variables (`--vscode-*`) so it matches the user's
+real light/dark/high‑contrast theme rather than a fixed palette. It reads a **local,
+per‑project history file** and renders:
 
-1. **Benchmark results** — the Leg‑A numbers above, saved locally and re‑run‑able, so this
-   is the first thing a skeptical colleague sees.
-2. **Session ledger (Leg B)** — tokens/cost over time, split **with ContextPrune active**
-   vs **without** (a master on/off toggle tags every entry), by mode and by token type.
-3. **Instructions & mode health** — instructions‑budget flags, whether the Lean mode is the
-   active default, tool/MCP overhead.
-4. **Links to native ground truth** — deep links / instructions to the model‑picker cost
-   tier, per‑response hover cost, and Cache Explorer, so numbers are always checkable
-   against VS Code's own UI, never just ours.
+1. **Summary tiles** — runs logged, tasks benchmarked, avg. output‑token change, est. $ saved
+   to date.
+2. **By‑project table** — every distinct project (see storage below), its run count, average
+   output‑token reduction, estimated $ saved, last‑run time. This is the "projectwise savings"
+   view.
+3. **Recent runs** — the last 15 benchmark runs, one row each.
+4. **Personalization** — "Hi \<name\>" once signed in (see below), or a "Sign in with GitHub"
+   button; and a **"Run another benchmark"** button that triggers a new run and refreshes in
+   place.
 
-Data source: `context.storageUri` (a local JSON file, purely local, never transmitted —
-consistent with the no‑telemetry rule; it's the user's own data, exportable by them).
+**Storage:** `context.globalStorageUri/contextprune-history.json` — a flat JSON array of
+benchmark records (timestamp, project, model, per‑task token counts, totals, estimated cost).
+Purely local, never transmitted, survives across workspace sessions on this machine.
+**Project id = the first workspace folder's name** — simple and enough to group by right now,
+but *not* a stable identity across clones or renames of the same repo; a git‑remote‑derived id
+is a reasonable upgrade, not done yet. Every run from `runBenchmark` is appended automatically
+and the open dashboard (if any) refreshes itself.
 
-A **visual mockup** of this dashboard (illustrative data, clearly labeled as a mockup) is
-available as a separate artifact so we can agree on the design before building the real
-webview — see the message accompanying this plan update.
+The earlier **visual‑design mockup** (illustrative data, hand‑designed palette/typography) stays
+useful as the target for Phase 1's *polish* pass — the real webview above is intentionally
+plainer (VS Code theme tokens, simple tables) since it's wired to real, growing data now rather
+than a one‑time design artifact.
+
+### Personalization — signed‑in GitHub identity
+
+`ContextPrune Spike: Sign in with GitHub` and the dashboard's own "Sign in" button both call
+`vscode.authentication.getSession(...)` — VS Code's **built‑in** auth broker (the same one
+Settings Sync and the GitHub Pull Requests extension use), not custom OAuth code in this
+extension. Behavior:
+
+- Tries **silently first** (`createIfNone: false`) against both `'github'` (github.com / GHEC)
+  and `'github-enterprise'` (self‑hosted GHES, when `github-enterprise.uri` is configured) —
+  if the user is already signed in to either for some other purpose, the dashboard greets them
+  with no extra prompt.
+- If neither has a session and the user explicitly clicks "Sign in," asks which GitHub
+  (`github` vs `github-enterprise`) and only then calls `getSession(..., { createIfNone: true })`,
+  which shows VS Code's own system consent dialog — never a form inside our extension.
+- Requests **`read:user` only** — no repo, no write access. Uses just `session.account.label`
+  for the greeting; the access token is never logged, stored, or read for anything else by
+  ContextPrune.
+- **Never automatic.** No sign‑in prompt fires on activation; it only ever happens after the
+  user clicks something.
+
+This is the enterprise‑constraints exception called out in §4.1 — worth an explicit decision
+entry (§10) rather than quietly expanding the "no new network calls" rule.
 
 ### Branding — icon
 
 VS Code requires a **PNG** icon (`icon` field in `package.json`; SVG is rejected by
-`vsce package`). A simple mark was generated this session and wired into the spike so it
-already looks like a real, installable extension rather than a bare scaffold — see
-`spike/images/icon.png`.
+`vsce package`). A simple mark was generated this session and wired into `package.json` *and*
+the chat participant's `iconPath` — see `spike/images/icon.png`. **Known limitation:** the
+`package.json` icon only renders in the Extensions view / a Marketplace‑style listing, which
+only appears once the extension is **installed from a `.vsix`** — it does *not* show anywhere
+when running via F5 (Extension Development Host), which is why it wasn't visible during
+Phase 0 testing. The chat participant's icon (visible immediately, any way you run it) now
+uses the same PNG rather than a generic `ThemeIcon`, so branding is visible in F5 too.
 
 ---
 
@@ -402,7 +446,7 @@ already looks like a real, installable extension rather than a bare scaffold —
 | Phase | Goal | Deliverable |
 |---|---|---|
 | **0 — Spike (~1 wk)** | De‑risk APIs | `countTokens`, `selectChatModels` (+ enumerate models), participant registration, `github.copilot.*` read, tab enumeration, custom‑mode detection — in Restricted Mode **and** offline. **Scaffolded → [`spike/`](spike/), compiles clean, `engines ^1.95.0`. Ran in the org — see §11.** |
-| **0.5 — Proof (this session)** | A showcase‑ready number, fast | **Benchmark mode** added to the spike (real, org‑specific, before/after token counts); a **dashboard mockup** to agree on design; a **branded icon** so it looks real. See §6. |
+| **0.5 — Proof (this session)** | A showcase‑ready number, fast | **Benchmark mode** (real, org‑specific, before/after token counts) → **local per‑project history** → a **real dashboard webview** reading it (not just a mockup) → optional **"Hi \<name\>"** via VS Code's built‑in GitHub auth → **branded icon** wired into both the extension listing and the chat participant. All shipped this session — see §6. A separate **visual‑design mockup** remains the target for Phase 1's polish pass. |
 | **1 — Measure + Output discipline** | Visibility + the cheapest big win | Token HUD, **real dashboard webview** (built from the Proof spec), cost ledger (per mode / token type, with/without tagging), instructions budget report, per‑file lens, terse‑output presets, prompt linter. Local tokenizer. Ship `.vsix`. |
 | **2 — Reduce inline** | Cut wasted inline requests | Smart tab manager, contextual toggling, exclusion assistant, "prefer completions" nudge. |
 | **3 — Chat + cache + Agent** | Ask path, cache hygiene, Agent hooks | `@contextprune` participant, cache‑buster warnings, cache‑friendly ordering, history nudge, cache‑aware model downshift, `/trim` + `contextprune_retrieve` tools, "Lean" custom mode, tool/MCP hygiene report, `prompt-tsx`. |
@@ -428,6 +472,16 @@ already looks like a real, installable extension rather than a bare scaffold —
    for the initial showcase; production ledger with with/without tagging for ongoing proof;
    org billing‑API correlation stays **optional, Phase 4, admin opt‑in** — never required,
    never a default network call.
+8. **Local history storage:** `context.globalStorageUri/contextprune-history.json`, a flat
+   JSON array, one record per benchmark run — never a database, never synced. Project id =
+   workspace‑folder name for now (simple, good enough to ship); revisit with a git‑remote‑based
+   id only if folder‑name collisions turn out to matter in practice.
+9. **GitHub identity is opt‑in personalization, not a dependency.** Uses VS Code's built‑in
+   auth broker (`'github'` / `'github-enterprise'`), `read:user` scope only, silent‑check
+   before ever prompting, never fires without an explicit user click. Every other feature
+   (benchmark, dashboard, history) works fully signed‑out — this only changes "Sign in with
+   GitHub" into "Hi \<name\>". Documented as the one named exception to the no‑new‑network
+   rule (§4.1).
 
 ---
 
