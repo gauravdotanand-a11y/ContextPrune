@@ -139,11 +139,56 @@ reviewable source). ContextPrune ⊃ this extension's advisory feature set.
   a fresh chat / isolated task**. Mid‑conversation it **invalidates the ~94% prompt cache**,
   re‑billing the whole context as fresh input — usually a net loss. So the feature must be
   **cache‑aware**: downshift only on a new conversation, otherwise just *advise*.
-- No cost field in the API → ship a small admin‑overridable `model-multipliers.json`; unknown
+- No cost field in the API → ship a small admin‑overridable `model-pricing.json` keyed by
+  family, storing **$/M‑token input / cached‑input / output** (usage‑based billing is priced
+  per token per type, not a flat multiplier — see the confirmed seed table below). Unknown
   models show "cost unknown", never guessed. Prefer surfacing the **native** model‑picker cost
   tier over our own estimate.
+- The output/cached ratio is **not a flat 5×/50×** — it varies by vendor (see below). Ship
+  per‑family numbers, not one global constant.
+- **Exclude internal/utility models** from anything user‑facing (downshift candidates, the
+  model picker we build, the ledger's "you could have used X" suggestion): families like
+  `copilot-utility`, `copilot-utility-small`, `copilot-dictation-cleanup-luna`, any entry with
+  `maxInputTokens === 0`, or `vendor !== 'copilot'` are Copilot's own internal plumbing, not
+  chat models a user would pick.
 - The shipped **"Lean" mode** pins `model:` — the one clean way to steer built‑in Agent model
   choice without fighting the user mid‑session.
+
+#### `model-pricing.json` — seed data (confirmed from a live org run + GitHub's pricing docs)
+
+The spike's check [4] returned **19 models** (18 `vendor: 'copilot'`) from a real org on VS
+Code 1.137.0 / Copilot Chat 0.65.0. Matched against GitHub's current per‑token pricing
+($ / 1M tokens):
+
+| Family | Input | Cached input | Output | Output ÷ input | Output ÷ cached |
+|---|---|---|---|---|---|
+| `gpt-5.6-luna` | $0.20 | $0.02 | $1.20 | 6× | 60× |
+| `gpt-5-mini` | $0.25 | $0.025 | $2.00 | 8× | 80× |
+| `gemini-3.7-flash` / `gemini-3.8-flash` | $0.75 | $0.075 | $3.75 | 5× | 50× |
+| `gpt-5.4-mini` | $0.75 | $0.075 | $4.50 | 6× | 60× |
+| `claude-haiku-4.5` | $1.00 | $0.10 | $5.00 | 5× | 50× |
+| `gpt-5.3-codex` | $1.75 | $0.175 | $14.00 | 8× | 80× |
+| `claude-sonnet-5` | $2.00 | $0.20 | $10.00 | 5× | 50× |
+| `gpt-5.6-terra` | $2.00 | $0.20 | $12.00 | 6× | 60× |
+| `gpt-5.6-sol` | $4.00 | $0.40 | $20.00 | 5× | 50× |
+| `claude-opus-4.8` / `claude-opus-5` | $5.00 | $0.50 | $25.00 | 5× | 50× |
+| `gpt-5.5` | $5.00 | $0.50 | $30.00 | 6× | 60× |
+
+**Corrections to our earlier "output ≈5× input, ≈50× cached" rule of thumb:** it holds for
+Anthropic, Gemini, and `gpt-5.6-sol`, but OpenAI's other families run **6–8× input / 60–80×
+cached** — `gpt-5.3-codex` and `gpt-5-mini` are the most output‑expensive *relative to their
+own input price*, which matters for Agent mode (which is output‑heavy). `gpt-4o-mini` — one of
+the 18 returned by the API — **isn't in the current pricing table at all**; treat it as either
+legacy/free or a fallback with unknown pricing, and flag it "cost unknown" rather than
+guessing it's still the historical cheap option.
+
+Also confirmed live: `maxInputTokens` varies far more than the docs' "GPT‑4o = 64K" figure
+suggested — from **12,078** (`gpt-4o-mini`, `copilot-utility-small`) up to **~921K–982K**
+(the flagship Claude/Gemini/GPT‑5.5+ families in this deployment). Don't hardcode a context‑size
+assumption anywhere; always read `model.maxInputTokens` live.
+
+> Source for prices: [github.com/…/models-and-pricing](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing) (usage‑based billing, not the legacy multiplier
+> table — that page covers annual‑plan PRUs only and doesn't list most of these families).
 
 ---
 
@@ -172,7 +217,7 @@ reviewable source). ContextPrune ⊃ this extension's advisory feature set.
 | Feature | Description | Deps |
 |---|---|---|
 | **Token HUD** | Status‑bar estimate of the inline "context footprint" (active file + open tabs + instructions). Click → per‑mode breakdown. | local tokenizer |
-| **Cost ledger** | Local session tally split by **mode** and **token type** (output / fresh input / cached), using the ~5×/~50×/~10× ratios + the multiplier table. Export JSON/CSV. Points to native **Cache Explorer** / per‑response hover for ground truth. | `countTokens` |
+| **Cost ledger** | Local session tally split by **mode** and **token type** (output / fresh input / cached), priced via the confirmed per‑family `model-pricing.json` (§3). Export JSON/CSV. Points to native **Cache Explorer** / per‑response hover for ground truth. | `countTokens` |
 | **Per‑file / selection lens** | CodeLens + command: token count for file / selection / symbol. | local tokenizer |
 | **Instructions budget report** | Parse `copilot-instructions.md`, `*.instructions.md`, `*.agent.md`/`*.chatmode.md`, `AGENTS.md`; per‑file token cost, "paid every turn in every mode", verbosity + duplication flags, **missing‑brevity‑constraint** flag. | local tokenizer |
 
@@ -198,7 +243,7 @@ reviewable source). ContextPrune ⊃ this extension's advisory feature set.
 | Feature | Description | Deps |
 |---|---|---|
 | **Smart tab manager** | Keep only *N* relevant editors (`contextprune.maxOpenTabs`, default 5); LRU + pin‑aware; Focus mode stashes/restores. | Tabs API |
-| **Contextual Copilot toggling** | Scope `github.copilot.enable` / `editor.inlineSuggest.enabled` off for big / minified / generated files, non‑code langs, comment‑only regions, diff editors, active debug. | settings API |
+| **Contextual Copilot toggling** | Scope `github.copilot.enable` / `editor.inlineSuggest.enabled` off for big / minified / generated files, non‑code langs, comment‑only regions, diff editors, active debug. **Detect either `GitHub.copilot` or `GitHub.copilot-chat`** — confirmed live that some orgs ship chat‑only, with completions folded into `copilot-chat`; don't assume the classic extension id exists. | settings API |
 | **Exclusion assistant** | Scan for large/vendored dirs; propose `files.exclude` + `search.exclude` + a draft content‑exclusion YAML; lint existing. | fs scan |
 | **"Prefer completions" nudge** | When a chat request looks like something Tab completion / NES could do, gently say so. Onboarding covers it too. | heuristic |
 
@@ -226,7 +271,7 @@ reviewable source). ContextPrune ⊃ this extension's advisory feature set.
 - **Language:** TypeScript. **Bundler:** `esbuild`. **No native modules.** Optional wasm tokenizer.
 - **Modules:** `tokenizer/`, `context-model/` (inline footprint), `rules/` (toggle engine),
   `tabs/`, `chat/` (participant + tools + `prompt-tsx`), `modes/` (ship + lint the Lean mode),
-  `models/` (`selectChatModels` wrapper + multiplier table + cache‑aware downshift), `cache/`
+  `models/` (`selectChatModels` wrapper + `model-pricing.json` + cache‑aware downshift), `cache/`
   (session‑state watchers for cache‑buster detection), `retrieval/` (lexical / TF‑IDF / symbol
   ranking, chunker, comment stripper), `report/` (ledger + FinOps), `config/`.
 - **Activation:** `onStartupFinished`. Contributes: status bar, commands, chat participant, LM
@@ -243,9 +288,11 @@ reviewable source). ContextPrune ⊃ this extension's advisory feature set.
 2. **`@contextprune` is Ask‑only** — it does not run inside Agent mode's loop; Agent coverage
    is the contributed tools + the Lean mode.
 3. Cannot read GitHub's **real** billing. Cost figures are **estimates** from local tokenizers
-   + the reported ~5× / ~50× / ~10× ratios + a static multiplier table. Native **Cache
-   Explorer** and per‑response hover cost are the ground truth we point users to.
-4. **No cost / multiplier / cache field in the LM API.**
+   + the confirmed per‑family `model-pricing.json` (§3) — which itself will drift as GitHub
+   changes prices, and covers only the families we've seen. Native **Cache Explorer** and
+   per‑response hover cost are the ground truth we point users to.
+4. **No cost / multiplier / cache field in the LM API** — pricing must be maintained out of
+   band and will go stale; ship a "prices as of `<date>`, verify against GitHub's docs" notice.
 5. **Content exclusions** are admin‑only — we lint and draft, we don't apply.
 6. `vscode.lm` needs **consent + entitlement**; without it only Measure + inline features work.
    `@contextprune` is **opt‑in**.
@@ -293,19 +340,20 @@ these need a run **inside the real org**:
 
 | # | Check | How | Why it changes the plan | Status |
 |---|---|---|---|---|
-| 1 | LM API returns Copilot models | check [4] `OK` / `EMPTY` | If policy blocks the LM API for extensions, the `@contextprune` pillar dies → tools + Lean mode + advice only. | ✅ **19 models returned** — LM API is usable in this org. Vendor‑filtered `copilot` count + consent‑flow detail still TBD (see #2). |
-| 2 | Consent dialog appears & is acceptable | first run of [4] | Admin‑blocked consent = same as #1. | ❓ pending — did a consent prompt appear, and did you accept it? |
-| 3 | Which models are enabled + families | [4] model list | Feeds the multiplier table + downshift; are cheap `*-mini` models even available? | ✅ **19 models** confirmed; full list of ids/families still needed to populate the multiplier table — paste it when convenient. |
+| 1 | LM API returns Copilot models | check [4] `OK` / `EMPTY` | If policy blocks the LM API for extensions, the `@contextprune` pillar dies → tools + Lean mode + advice only. | ✅ **18 `vendor:'copilot'` models** (19 incl. 1 `copilotcli` entry). LM API fully usable. |
+| 2 | Consent dialog appears & is acceptable | first run of [4] | Admin‑blocked consent = same as #1. | ❓ pending — the run succeeded, but confirm a consent prompt actually appeared (vs. already‑granted from a prior session) so we know new users won't be silently blocked. |
+| 3 | Which models are enabled + families | [4] model list | Feeds the pricing table + downshift; are cheap `*-mini` models even available? | ✅ **Done** — full 18‑model list captured and matched against GitHub's live pricing; seed `model-pricing.json` table added to §3. |
 | 4 | `.vsix` sideload allowed | `code --install-extension …` | Signature / `extensions.allowed` policy may need the org signing path first. | ❓ pending |
-| 5 | `countTokens` vs naive delta | [5] output | Whether a bundled offline tokenizer is trustworthy as fallback. | ❓ pending — need the actual numbers (string/message/naive) |
-| 6 | `github.copilot.advanced` + lock scope | [3] output | Which knobs are centrally managed vs. ours to set. | ❓ pending |
+| 5 | `countTokens` vs naive delta | [5] output | Whether a bundled offline tokenizer is trustworthy as fallback. | ✅ string=101, message=105, naive(chars/4)=113 — naive **overestimates by ~10–12%** on English prose. Usable as a "≤ this many, rounded up" fallback bound, not exact. |
+| 6 | `github.copilot.advanced` + lock scope | [3] output | Which knobs are centrally managed vs. ours to set. | ✅ `advanced=undefined` (unset), `enable` only has a **default** value, no global/workspace override — nothing here is settings‑locked in this org. |
 | 7 | Custom mode support (≥ 1.102, "Configure Chat Modes") | [6] output | Ship the Lean mode now or gate it. | ✅ **Confirmed OK** — VS Code 1.137.0, "Configure Chat Modes/Agents" command present. Ship the Lean mode unconditionally for this org. |
 | 8 | Content exclusions in effect | open large/vendored files | Advisory‑only OK, or org expects us to drive exclusions. | ❓ pending |
-| 9 | Restricted Mode default + spike still works | [1] says `RESTRICTED … works` | Confirms `untrustedWorkspaces: supported` suffices. | ❓ pending |
+| 9 | Restricted Mode default + spike still works | [1] says `RESTRICTED … works` | Confirms `untrustedWorkspaces: supported` suffices. | ⚠️ **Inconclusive** — this run had `isTrusted=true` (a trusted workspace), so Restricted Mode itself wasn't exercised. Re‑run after opening an actual untrusted folder (or *File → Restrict Workspace*) to confirm the extension still activates. |
 | 10 | Offline behaviour | disconnect, re‑run | [1][2][3] pass; [4][5] fail *fast*. A hang is a Phase 1 bug. | ❓ pending |
 | 11 | Auth proxy | note `http.proxy` / `http.proxySupport` | Confirms the real extension needs zero HTTP of its own. | ❓ pending |
 | 12 | Deployed VS Code version | Help → About | Confirms `^1.95.0` and whether ≥ 1.102 features exist. | ✅ **1.137.0** — comfortably above both floors. |
 | 13 | Native cost UI available | model picker cost tier? response‑hover cost? Agent Debug Logs → Cache Explorer? | If present, our ledger *links to* them instead of estimating; if stripped in the org build, our estimate matters more. | ❓ pending |
+| 14 | *(new)* Which Copilot extension is actually installed | check [3] output | Changes our extension‑detection + settings‑targeting logic in Pillars 2/4. | ⚠️ **Finding:** `GitHub.copilot` (classic completions) is **NOT installed**; only `GitHub.copilot-chat` v0.65.0 is present and active. In this org, one unified extension covers both inline + chat. ContextPrune must detect **either** extension id, not assume `GitHub.copilot` exists — see follow‑ups below. |
 
 ---
 
